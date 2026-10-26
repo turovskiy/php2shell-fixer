@@ -53,6 +53,27 @@ lists web-b '2024-04-24 06:00:00 UTC' archive.ubuntu.com_ubuntu_dists_noble_univ
 lists web-d '2026-09-30 06:00:00 UTC' ppa.launchpadcontent.net_ondrej_php_ubuntu_dists_noble_main_binary-amd64_Packages
 lists web-d '2026-10-25 06:00:00 UTC' mirrors.digitalocean.com_ubuntu_dists_noble-security_main_binary-amd64_Packages
 lists web-e '2026-10-22 06:00:00 UTC' security.ubuntu.com_ubuntu_dists_jammy-security_main_binary-amd64_Packages.lz4
+# dpkg file lists: their mtime is the install time the restart check compares with the service start.
+dpkglists() { # dpkglists <host> <date> <package>...
+  local h=$1 t=$2 p; shift 2
+  mkdir -p "$WORK/hosts/$h/root/var/lib/dpkg/info"
+  for p in "$@"; do touch -d "$t" "$WORK/hosts/$h/root/var/lib/dpkg/info/$p.list"; done
+}
+dpkglists web-j '2026-10-22 06:00:00 UTC' php8.3-fpm php8.3-common
+dpkglists web-j '2026-10-24 06:00:00 UTC' php8.4-fpm
+dpkglists web-j '2026-10-24 07:00:00 UTC' php8.4-opcache
+# apt-helper is called by absolute path, so it goes into the fake root of every host with remote/ fixtures:
+# "download-file URL DEST" copies remote/<URL with / and : as _> to DEST.
+for h in "$WORK"/hosts/*/; do
+  [ -d "$h/remote" ] || continue
+  mkdir -p "$h/root/usr/lib/apt"
+  printf '%s\n' '#!/usr/bin/env bash' 'echo "apt-helper $*" >>"$STUB_LOG"' \
+    'for a; do case $a in http*) url=$a ;; esac; done; dest=${!#}' \
+    'src=$P2S_STUB/remote/$(printf %s "$url" | tr "/:" "__")' \
+    '[ -f "$src" ] || { echo "E: Failed to fetch $url  404  Not Found" >&2; exit 100; }' \
+    'cp "$src" "$dest"' >"$h/root/usr/lib/apt/apt-helper"
+  chmod +x "$h/root/usr/lib/apt/apt-helper"
+done
 
 for d in "$WORK"/hosts/*/debs/*/; do
   [ -d "$d" ] || continue
@@ -80,6 +101,8 @@ stub systemctl 'if [ "$1" = is-active ]; then
   echo inactive; exit 3
 fi
 [ "$1" = reload ] && [ -e "$P2S_STUB/fail-reload" ] && exit 1
+# show -p ActiveEnterTimestamp --value <unit>: start time from started.txt ("<unit> <time>"), empty if absent
+[ "$1" = show ] && [ -f "$P2S_STUB/started.txt" ] && sed -n "s/^${!#} //p" "$P2S_STUB/started.txt"
 exit 0'
 stub dpkg "exec $REAL_DPKG \"\$@\""
 stub apt-cache '[ "$1" = madison ] && [ -f "$P2S_STUB/madison/$2.txt" ] && cat "$P2S_STUB/madison/$2.txt"
@@ -95,7 +118,19 @@ if [ "$1" = download ]; then
 fi'
 stub dpkg-deb 'cat >/dev/null
 [ "$1" = --fsys-tarfile ] && exec cat "$P2S_STUB/debs/$(cat "$2").tar"'
-for t in apt apt-mark; do stub "$t" 'exit 0'; done
+stub apt 'exit 0'
+stub apt-mark '[ "$1" = showhold ] && [ -f "$P2S_STUB/holds.txt" ] && cat "$P2S_STUB/holds.txt"
+exit 0'
+stub apt-config '[ "$1" = dump ] && [ -f "$P2S_STUB/apt-config.txt" ] && cat "$P2S_STUB/apt-config.txt"
+exit 0'
+# nginx -T as nginx prints it: every loaded file behind a "# configuration file" header, sites-enabled
+# entries read through their symlinks. A host without /etc/nginx has no nginx (127).
+stub nginx '[ -d "$P2S_ROOT/etc/nginx" ] || { echo "nginx: command not found" >&2; exit 127; }
+echo "nginx: the configuration file /etc/nginx/nginx.conf syntax is ok" >&2
+for f in "$P2S_ROOT/etc/nginx/nginx.conf" "$P2S_ROOT"/etc/nginx/sites-enabled/*; do
+  [ -f "$f" ] || continue
+  echo "# configuration file ${f#"$P2S_ROOT"}:"; cat "$f"; echo
+done'
 stub id 'echo "${STUB_UID:-0}"'
 # SAPI binaries: the effective upload_progress comes from the fake root's ini files, last assignment wins
 # (php.ini, then conf.d in order). A host without /etc/php/<X.Y>/<sapi> behaves as if the binary failed.
@@ -129,7 +164,7 @@ export TMPDIR=$WORK/hosttmp
 mkdir -p "$TMPDIR"
 
 # Calls an audit may make; anything else in the stub log is a write or a package operation.
-READ_ONLY='^(ssh [^ ]+ bash -s|hostname ?|dpkg-query .*|systemctl is-active [^ ]+|dpkg --compare-versions .*|apt-cache madison [^ ]+|apt-get download -q [^ ]+|dpkg-deb --fsys-tarfile [^ ]+|php-(fpm|cgi)[0-9.]+ -i)$'
+READ_ONLY='^(ssh [^ ]+ bash -s|hostname ?|dpkg-query .*|systemctl is-active [^ ]+|systemctl show -p ActiveEnterTimestamp --value [^ ]+|dpkg --compare-versions .*|apt-cache madison [^ ]+|apt-get download -q [^ ]+|dpkg-deb --fsys-tarfile [^ ]+|php-(fpm|cgi)[0-9.]+ -i|apt-mark showhold|apt-config dump|nginx -T|apt-helper .* download-file [^ ]+ [^ ]+)$'
 fingerprint() { (cd "$WORK/hosts" && find . -type f -exec md5sum {} + | sort); }
 
 echo "▸ verdict (installed build)"
@@ -139,6 +174,8 @@ echo "▸ verdict (installed build)"
 . "$S/lib/p2s.sh"
 # shellcheck source=../scripts/lib/mitigation.sh
 . "$S/lib/mitigation.sh"
+# shellcheck source=../scripts/lib/hostfacts.sh
+. "$S/lib/hostfacts.sh"
 vd() { p2s_verdict "$1" "$2" "$(p2s_origin "$2")" "$3"; }
 eq "$(vd 8.3 8.3.6-0ubuntu0.24.04.12 no)" "unfixed below-threshold" "Ubuntu 8.3 .12 unfixed"
 eq "$(vd 8.3 8.3.6-0ubuntu0.24.04.13 yes)" "fixed distro-threshold" "Ubuntu 8.3 .13 fixed"
@@ -186,6 +223,33 @@ $(p2s_list_origin nginx.org_packages_mainline_ubuntu_noble_Release)" \
   "ppa ppa distro distro other" "list origin: ondrej PPA, sury, Ubuntu mirror, Debian, other"
 eq "$(p2s_lists_stale 2026-10-20T23:59:59Z) $(p2s_lists_stale 2026-10-21T00:00:00Z) $(p2s_lists_stale unknown)" \
   "yes no unknown" "lists before the fix day are stale, from it on are not"
+
+echo "▸ host facts: parsing"
+NG='# configuration file /etc/nginx/sites-enabled/a:
+upstream php84 { server unix:/run/php/php8.4-fpm.sock; server 127.0.0.1:9084; }
+server {
+  server_name a.example.com b.example.com; # comment { not a block
+  location ~ \.php$ { fastcgi_pass unix:/var/run/php/php8.3-fpm.sock; }
+  location /x { fastcgi_pass php84; }
+}
+server { listen 80; server_name static.example.net; }
+server { location ~ \.php$ { fastcgi_pass 127.0.0.1:9000; } }'
+eq "$(p2s_nginx_sites "$NG")" "$(printf '%s\n' 'a.example.com,b.example.com|unix:/var/run/php/php8.3-fpm.sock' \
+  'a.example.com,b.example.com|unix:/run/php/php8.4-fpm.sock' 'a.example.com,b.example.com|127.0.0.1:9084' '-|127.0.0.1:9000')" \
+  "nginx: passes per server, upstream resolved, static site skipped, no server_name -> -"
+yes_no() { "$@" && echo yes || echo no; }
+eq "$(yes_no p2s_listen_matches /run/php/php8.3-fpm.sock unix:/var/run/php/php8.3-fpm.sock) \
+$(yes_no p2s_listen_matches /run/php/php8.3-fpm.sock unix:/run/php/php8.4-fpm.sock) \
+$(yes_no p2s_listen_matches 9000 127.0.0.1:9000) \
+$(yes_no p2s_listen_matches 127.0.0.1:9000 localhost:9000) \
+$(yes_no p2s_listen_matches 127.0.0.1:9000 127.0.0.1:9001) \
+$(yes_no p2s_listen_matches 10.0.0.5:9000 127.0.0.1:9000)" \
+  "yes no yes yes no no" "listen vs fastcgi_pass: /var/run is /run, bare port, loopback names, port and address mismatch"
+eq "$(p2s_inrelease_name https://ppa.launchpadcontent.net/ondrej/php/ubuntu/ noble)" \
+  "ppa.launchpadcontent.net_ondrej_php_ubuntu_dists_noble_InRelease" "cached InRelease name, trailing slash ignored"
+eq "$(p2s_release_info "$(printf 'Origin: X\nLabel: A B\nDate: now\nSuite: noble\n')")" "$(printf 'Label: A B\nOrigin: X\nSuite: noble')" \
+  "Release info: only the fields apt guards"
+eq "$(p2s_enc 'a b%c')" "a%20b%25c" "record values: spaces and % encoded"
 
 echo "▸ audit: records"
 BEFORE=$(fingerprint)
@@ -269,6 +333,45 @@ eq "$(find "$TMPDIR" -mindepth 1 | head -3)" "" "no candidate download left behi
 
 bash "$S/run.sh" audit no-such-host >/dev/null 2>&1; code=$?
 eq "$code" 255 "unreachable host: ssh exit code passed through"
+
+echo "▸ audit: host facts"
+J=$(bash "$S/run.sh" audit web-j); code=$?
+eq "$code" 0 "web-j: exit 0"
+has "$J" "kind=webserver host=web-j nginx=present apache2=inactive" "web-j: nginx present, Apache not running"
+has "$J" "kind=vhost host=web-j names=shop.example.com,www.shop.example.com pass=unix:/var/run/php/php8.3-fpm.sock branch=8.3 pool=www" \
+  "web-j: symlinked site mapped to php8.3 www"
+has "$J" "kind=vhost host=web-j names=blog.example.org pass=unix:/run/php/php8.4-fpm.sock branch=8.4 pool=www" \
+  "web-j: site behind an upstream mapped to php8.4 www"
+hasnt "$J" "names=static.example.net" "web-j: static site has no pool"
+has "$J" "kind=pool host=web-j branch=8.3 pool=www listen=/run/php/php8.3-fpm.sock sites=1 used=yes" "web-j: 8.3 www used"
+has "$J" "kind=pool host=web-j branch=8.3 pool=legacy listen=/run/php/php8.3-legacy.sock sites=0 used=no" "web-j: 8.3 legacy unused"
+hasnt "$J" "pool=global" "web-j: [global] in php-fpm.conf is not a pool"
+has "$J" "branch=8.3 sapi=fpm installed=8.3.6-0ubuntu0.24.04.13" "web-j: 8.3 branch present"
+has "$J" "started=2026-10-20T06:00:00Z installed_at=2026-10-22T06:00:00Z restart=needed" "web-j: 8.3 started before install -> restart needed"
+has "$J" "started=2026-10-25T06:00:00Z installed_at=2026-10-24T07:00:00Z restart=ok" "web-j: 8.4 started after the newest package (opcache) -> ok"
+has "$J" "kind=hold host=web-j package=php8.3-fpm" "web-j: held php package"
+hasnt "$J" "package=nginx" "web-j: non-PHP hold left out"
+has "$J" "kind=source host=web-j file=/etc/apt/sources.list.d/ondrej-ubuntu-php-noble.sources uri=https://ppa.launchpadcontent.net/ondrej/php/ubuntu/ suite=noble release_info=changed changed=Label" \
+  "web-j: deb822 PPA source, Label changed"
+hasnt "$J" "ondrej/nginx" "web-j: commented-out source ignored"
+has "$J" "kind=autoupdate host=web-j periodic=1 origins=3 ppa_covered=no" "web-j: unattended-upgrades on, PPA not covered"
+has "$J" 'kind=uu_origin host=web-j value=${distro_id}:${distro_codename}-security' "web-j: origins recorded"
+has "$D" "kind=webserver host=web-d nginx=absent" "web-d: no nginx"
+has "$D" "kind=source host=web-d file=/etc/apt/sources.list.d/ondrej-php.list uri=https://ppa.launchpadcontent.net/ondrej/php/ubuntu suite=noble release_info=same changed=-" \
+  "web-d: one-line source; only Date and Version differ -> same"
+has "$D" "kind=source host=web-d file=/etc/apt/sources.list uri=https://packages.sury.org/php/ suite=noble release_info=unknown" \
+  "web-d: sury source without a cached InRelease -> unknown"
+hasnt "$D" "uri=http://archive.ubuntu.com" "web-d: distro sources are not PPA sources"
+has "$D" "kind=autoupdate host=web-d periodic=1 origins=2 ppa_covered=yes" "web-d: PPA origin covered"
+has "$D" "restart=unknown" "web-d: no start time -> restart unknown"
+has "$D" "kind=pool host=web-d branch=8.1 pool=www listen=/run/php/php8.1-fpm.sock sites=0 used=unknown" \
+  "web-d: no nginx -> a pool without sites is unknown, not a stop candidate"
+K=$(bash "$S/run.sh" audit web-k)
+has "$K" "kind=webserver host=web-k nginx=present apache2=active" "web-k: nginx and Apache"
+has "$K" "kind=pool host=web-k branch=8.3 pool=www listen=/run/php/php8.3-fpm.sock sites=1 used=yes" "web-k: pool used by nginx"
+has "$K" "kind=pool host=web-k branch=8.3 pool=api listen=127.0.0.1:9083 sites=0 used=unknown" \
+  "web-k: Apache running -> a pool nginx does not use is unknown, not a stop candidate"
+eq "$(find "$TMPDIR" -mindepth 1 | head -3)" "" "no InRelease download left behind"
 
 echo "▸ audit: mitigation"
 G=$(bash "$S/run.sh" audit web-g)
@@ -362,17 +465,25 @@ LOGS=$(ls "$P2S_CACHE"/web-[abcd]-audit-*.log)
 R=$(bash "$S/report.sh" $LOGS); code=$?
 eq "$code" 0 "report: exit 0"
 has "$R" "## web-a (ubuntu-24.04)" "report: web-a section"
-has "$R" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.13` | distro | active | yes | fixed | distro-threshold |' "report: web-a 8.3 row"
-has "$R" '| 7.4 | fpm | `1:7.4.33-31+ubuntu24.04.1+deb.sury.org+1` | ppa | active | yes | fixed | changelog |' "report: web-a 7.4 row"
-has "$R" '| 8.4 | fpm | `8.4.17-1+ubuntu24.04.1+deb.sury.org+1` | ppa | active | no | **unfixed** | below-threshold |' "report: unfixed in bold"
+has "$R" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.13` | distro | active | unknown | yes | fixed | distro-threshold |' "report: web-a 8.3 row"
+has "$R" '| 7.4 | fpm | `1:7.4.33-31+ubuntu24.04.1+deb.sury.org+1` | ppa | active | unknown | yes | fixed | changelog |' "report: web-a 7.4 row"
+has "$R" '| 8.4 | fpm | `8.4.17-1+ubuntu24.04.1+deb.sury.org+1` | ppa | active | unknown | no | **unfixed** | below-threshold |' "report: unfixed in bold"
 has "$R" "## web-c (debian-12)" "report: web-c section"
 has "$R" "No PHP-FPM or PHP-CGI installed." "report: host without a web SAPI"
-has "$R" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.12` | distro | inactive | no | **unfixed** | below-threshold | `8.3.6-0ubuntu0.24.04.13` |' \
+has "$R" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.12` | distro | inactive | not-running | no | **unfixed** | below-threshold | `8.3.6-0ubuntu0.24.04.13` |' \
   "report: target column with the target build"
 has "$R" '| below-threshold | none (no-fixed-build-in-cached-lists) |' "report: no target shows its reason"
 has "$R" '| distro-threshold | none (installed-fixed) |' "report: fixed branch shows installed-fixed"
 hasnt "$R" "kind=candidate" "report: candidate records not dumped"
 printf '@p2s schema=1 kind=host host=old os=ubuntu-24.04\n@p2s schema=1 kind=branch host=old branch=8.3 sapi=fpm installed=8.3.6-0ubuntu0.24.04.13 origin=distro active=active cve_changelog=yes verdict=fixed reason=distro-threshold\n' >"$WORK/old.log"
+JR=$(bash "$S/report.sh" "$(ls "$P2S_CACHE"/web-j-audit-*.log)")
+has "$JR" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.13` | distro | active | **needed** (started 2026-10-20, installed 2026-10-22) |' "report: restart needed with both dates"
+has "$JR" '| shop.example.com,www.shop.example.com | `unix:/var/run/php/php8.3-fpm.sock` | 8.3 | www |' "report: site row"
+has "$JR" '| 8.3 | legacy | `/run/php/php8.3-legacy.sock` | 0 | **unused: stop candidate** |' "report: unused pool flagged as stop candidate"
+has "$JR" 'Held PHP packages (apt will not upgrade them): `php8.3-fpm`' "report: held packages"
+has "$JR" '| **changed: Label** - apt-get update refuses this source until the change is accepted |' "report: changed Release Label"
+has "$JR" 'ondrej PPA covered: no - **PPA PHP is not updated automatically**' "report: PPA not covered by unattended-upgrades"
+has "$JR" '`${distro_id}:${distro_codename}-security`' "report: origins decoded"
 MR=$(bash "$S/report.sh" "$(grep -l 'kind=mitigation' "$P2S_CACHE"/web-h-ensure-*.log | head -1)" "$(ls "$P2S_CACHE"/web-g-audit-*.log)")
 has "$MR" '| 8.3 | fpm | absent | written | Off | 1 | **override** |' "report: mitigation row with the override state"
 has "$MR" '- php8.3 pool `www`: `/etc/php/8.3/fpm/pool.d/www.conf:6` php_admin_flag = on - **re-enables it**' "report: override listed with file and line"
@@ -399,9 +510,9 @@ echo "▸ fixtures carry no real client data"
 FX=$T/fixtures
 eq "$(find "$FX/hosts" -mindepth 1 -maxdepth 1 -printf '%f\n' | grep -vE '^web-[a-z]$')" "" "host names are web-<letter>"
 eq "$(grep -rhoE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' "$FX" | grep -vE '@[A-Za-z0-9.-]+\.example$')" "" "e-mail domains are .example"
-eq "$(grep -rhoE '(^|[[:space:]@=/])([0-9]{1,3}\.){3}[0-9]{1,3}' "$FX" | grep -vE '(192\.0\.2|198\.51\.100|203\.0\.113)\.')" "" \
-  "IPv4 addresses only from documentation ranges"
-eq "$(grep -rhoE 'https?://[^/ ]+' "$FX" | sort -u | grep -vxE 'https?://(archive|security)\.ubuntu\.com|https://ppa\.launchpadcontent\.net')" "" \
+eq "$(grep -rhoE '(^|[[:space:]@=/])([0-9]{1,3}\.){3}[0-9]{1,3}' "$FX" | grep -vE '(192\.0\.2|198\.51\.100|203\.0\.113)\.|127\.[0-9.]+$|0\.0\.0\.0$')" "" \
+  "IPv4 addresses only from documentation ranges or loopback"
+eq "$(grep -rhoE 'https?://[^/ ]+' "$FX" | sort -u | grep -vxE 'https?://(archive|security)\.ubuntu\.com|https://(ppa\.launchpadcontent\.net|packages\.sury\.org)')" "" \
   "URLs only of public package archives"
 
 echo

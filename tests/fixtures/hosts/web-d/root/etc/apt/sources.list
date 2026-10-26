@@ -1,0 +1,2 @@
+deb http://archive.ubuntu.com/ubuntu noble main
+deb https://packages.sury.org/php/ noble main

@@ -33,7 +33,9 @@ Ask Claude to check a server for PHP2Shell, or run the scripts yourself:
 
 Why not just `php -v`? Ubuntu ships the fix as `8.3.6-0ubuntu0.24.04.13`, and `php -v` still says `8.3.6`. The audit looks at the package version and its changelog instead.
 
-"fixed" in the report is about the installed package, not the running service. PHP-FPM keeps running the build it started with until it is restarted, so check that the service started after the package was installed before you tell anyone the server is safe: `systemctl show -p ActiveEnterTimestamp php8.3-fpm` against `stat -c %y /var/lib/dpkg/info/php8.3-fpm.list`. The audit will check this itself later ([#5](https://github.com/turovskiy/php2shell-fixer/issues/5)).
+"fixed" in the report is about the installed package. PHP-FPM keeps running the build it started with until it is restarted, so the report also has a Restart column: "needed" means the service started before the last PHP package was installed and still runs the old code. Only "fixed" together with Restart "ok" means the server is safe.
+
+Under the tables the report lists host facts that help decide how to patch: which site runs on which PHP-FPM pool (a pool no site uses is marked as a stop candidate), held PHP packages, the ondrej PPA sources and whether the PPA changed its Release info (then `apt-get update` refuses it until you accept the change), and whether unattended-upgrades covers the PPA at all. To check the Release info the audit downloads the PPA's current `InRelease` file into a temp folder and deletes it right after, the same way it handles candidate packages.
 
 The target comes from the package lists already on the server: the audit only reads, so it never runs `apt-get update`. "none" means the server's lists hold no fixed build, not that no fix exists. When the report marks the lists as older than the fixes, run `apt-get update` on the server and audit again before you decide anything.
 

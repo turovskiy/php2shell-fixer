@@ -1,0 +1,7 @@
+upstream php84 {
+    server unix:/run/php/php8.4-fpm.sock;
+}
+server {
+    server_name blog.example.org;
+    location ~ \.php$ { fastcgi_pass php84; }
+}
