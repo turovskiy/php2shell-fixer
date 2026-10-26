@@ -58,7 +58,7 @@ Write commands (`ensure`, `autoupdate`) are never cut off by a time limit, even 
 bash scripts/run.sh fix <host>
 ```
 
-This is the write that closes PHP2Shell. For every PHP branch that serves requests through PHP-FPM or Apache mod_php it installs the build the audit names as the target, with every package of that PHP version pinned to the same version; PECL extensions such as `php8.3-redis` keep their own versions. It also puts the upload_progress mitigation in place, runs the config test (`php-fpm -t` for a pool, `apachectl configtest` for mod_php), restarts only the pools, or Apache, it changed, and compares the HTTP status code of each nginx PHP site and each Apache vhost before and after. When a config test fails, the new ini is removed and the service is not restarted. On PHP 8.5 without a fixed build it also turns off `fatal_error_backtraces`.
+This is the write that closes PHP2Shell. For every PHP branch that serves requests through PHP-FPM or Apache mod_php it installs the build the audit names as the target, with every package of that PHP version pinned to the same version; PECL extensions such as `php8.3-redis` keep their own versions. It also puts the upload_progress mitigation in place, runs the config test (`php-fpm -t` for a pool, `apachectl configtest` for mod_php), restarts only the pools, or Apache, it changed, and compares the HTTP status code of each nginx PHP site and each Apache vhost before and after. Each vhost is asked on its own port and address: https on 443, plain http on any other port. For mod_php the restart is a full `systemctl restart apache2`, so every Apache site on the server is down for a few seconds: run the first mod_php patch on a client server at a quiet hour and watch it. When a config test fails, the new ini is removed and the service is not restarted. On PHP 8.5 without a fixed build it also turns off `fatal_error_backtraces`.
 
 It stops before touching anything when a PHP package is held, when `apt-get update` fails, or when the ondrej PPA changed its Release info; in that last case it prints the `apt-get update --allow-releaseinfo-change-...` command for you to run once you have checked the change. It never accepts it on its own.
 
@@ -74,7 +74,7 @@ bash scripts/run.sh ensure <host>
 
 It writes `99-security.ini` into `conf.d` where the file is missing or outdated, runs the config test, and reloads only the PHP-FPM pools, or Apache, it changed. If the test fails, it puts the old file back and leaves the pool or Apache running. Running it again on a host that is already fine changes nothing.
 
-It does not touch a `99-security.ini` someone else wrote, and it does not edit pool or Apache configs. If a pool turns upload progress back on (`php_admin_flag[session.upload_progress.enabled] = on`), or Apache config does (`php_admin_flag session.upload_progress.enabled on`), the command exits with code 3 and names the file and line, and you fix it by hand. `.htaccess` files are not checked. CLI is left alone: it serves no web requests.
+It does not touch a `99-security.ini` someone else wrote, and it does not edit pool or Apache configs. If a pool turns upload progress back on (`php_admin_flag[session.upload_progress.enabled] = on`), or Apache config does (`php_admin_flag session.upload_progress.enabled on`, in any file Apache reads, your own `Include` files too), the command exits with code 3 and names the file and line, and you fix it by hand. `.htaccess` files are not checked. CLI is left alone: it serves no web requests.
 
 This is a write on the server, so run it yourself or approve it when Claude asks.
 
@@ -88,13 +88,15 @@ On Ubuntu, unattended-upgrades installs security updates from Ubuntu only. PHP f
 bash scripts/run.sh autoupdate <host>
 ```
 
-The command does three things, in this order:
+Before anything else it checks that the PPA has not changed its Release info (Origin, Label) since apt last downloaded it. If it has, the command writes nothing and prints the `apt-get update --allow-releaseinfo-change-...` command for you to run once you have checked the change. Only the PHP PPA counts: `ondrej/nginx` or `ondrej/apache2` on the same server never gets into unattended-upgrades.
+
+Then it does three things, in this order:
 
 1. For every PHP version installed from Ubuntu or Debian that the PPA also ships, it writes a pin that keeps the PPA builds away from it: `/etc/apt/preferences.d/php2shell-php8.3.pref` with `Pin-Priority: -1`. The `.pref` ending matters. apt reads only files in that folder with no extension or with `.pref`, and `php8.3` alone already counts as having one (`.3`).
-2. It asks apt (`apt-cache policy`) which build it would now install for every PHP package. If any package would switch between Ubuntu and the PPA, the command stops, names the PHP version and the pin that does not work, and goes no further. The pins it wrote stay: they only keep each version where it is.
-3. It adds the PPA to the list unattended-upgrades accepts (`/etc/apt/apt.conf.d/51php2shell-ppa-origins`) and runs `unattended-upgrade --dry-run` to check the PPA shows up. If it does not, that file is taken out again.
+2. It asks apt (`apt-cache policy`) which build it would now install for every PHP package, and where each build comes from, by the source apt lists for it rather than by the version number. If any package would switch between Ubuntu or Debian and the PPA, or a pinned PHP version still has a PPA build apt does not hold off (a pin that does nothing, even while the PPA build happens to be older), the command stops, names the PHP version and the pin that does not work, and goes no further. The pins it wrote stay: they only keep each version where it is.
+3. It adds the PPA to the list unattended-upgrades accepts (`/etc/apt/apt.conf.d/51php2shell-ppa-origins`) and runs `unattended-upgrade --dry-run` to check the PPA shows up and that unattended-upgrades would not now upgrade an Ubuntu or Debian PHP package from the PPA. If either check fails, that file is taken out again. If your connection drops before the check is done, the file is put back as it was.
 
-If a server already has an equivalent pin or PPA entry, under any file name, the command finds it by content and writes nothing twice. A pin under a name apt skips (for example `ondrej-php.conf`) shows up in step 2, and the command tells you what to rename it to. On a server without the PPA it writes nothing. Every run ends with the commands that undo what it wrote.
+If a server already has an equivalent pin or PPA entry, under any file name, the command finds it by content and writes nothing twice. A pin under a name apt skips (for example `ondrej-php.conf`) shows up in step 2, and the command tells you what to rename it to. On a server without the PPA it writes nothing. Every run ends with the commands that undo what it wrote; a file it had to overwrite is kept first in `/var/lib/php2shell/backup`, and the undo command copies it back.
 
 This is a write on the server, so run it yourself or approve it when Claude asks.
 
