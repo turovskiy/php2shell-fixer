@@ -43,13 +43,24 @@ for log in "$@"; do
         ;;
       branch)
         if [ "$rows" -eq 0 ]; then
-          echo '| Branch | SAPI | Installed | Origin | Service | CVEs in changelog | Verdict | Reason |'
-          echo '|---|---|---|---|---|---|---|---|'
+          echo '| Branch | SAPI | Installed | Origin | Service | CVEs in changelog | Verdict | Reason | Target | apt lists |'
+          echo '|---|---|---|---|---|---|---|---|---|---|'
         fi
         v=${r[verdict]}
         [ "$v" = fixed ] || v="**$v**"
-        printf '| %s | %s | `%s` | %s | %s | %s | %s | %s |\n' "${r[branch]}" "${r[sapi]}" "${r[installed]}" \
-          "${r[origin]}" "${r[active]}" "${r[cve_changelog]}" "$v" "${r[reason]}"
+        # Logs written before targets and list dates existed carry neither field.
+        case ${r[target]:-} in
+          '') tgt=- ;;
+          none) tgt="none (${r[target_reason]:-})" ;;
+          *) tgt="\`${r[target]}\`" ;;
+        esac
+        case ${r[lists_stale]:-} in
+          '') lists=- ;;
+          yes) lists="**${r[lists_updated]%%T*}, older than the fixes**" ;;
+          *) lists=${r[lists_updated]%%T*} ;;
+        esac
+        printf '| %s | %s | `%s` | %s | %s | %s | %s | %s | %s | %s |\n' "${r[branch]}" "${r[sapi]}" "${r[installed]}" \
+          "${r[origin]}" "${r[active]}" "${r[cve_changelog]}" "$v" "${r[reason]}" "$tgt" "$lists"
         rows=$((rows + 1))
         ;;
     esac

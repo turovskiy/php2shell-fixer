@@ -1,0 +1,8 @@
+php8.1 (8.1.2-1ubuntu2.28) jammy-security; urgency=medium
+
+  * SECURITY UPDATE: PHP2Shell
+    - debian/patches/CVE-2026-109618_109619.patch
+    - CVE-2026-109618
+    - CVE-2026-109619
+
+ -- Ubuntu Security Team <security@ubuntu.example>  Tue, 21 Oct 2026 12:00:00 +0000

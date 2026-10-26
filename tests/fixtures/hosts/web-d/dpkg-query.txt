@@ -1,0 +1,2 @@
+ii |php8.1-fpm|8.1.33-1+ubuntu24.04.1+deb.sury.org+1
+ii |php7.4-fpm|1:7.4.33-24+ubuntu24.04.1+deb.sury.org+1
