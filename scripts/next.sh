@@ -43,6 +43,7 @@ for target in $(cut -f1 <<<"$newest" | sort -u); do
           [ "$(word unfixed "$w")" = - ] || reason+=", unfixed: php$(word unfixed "$w" | sed 's/,/, php/g')"
           [ "$(word unmitigated "$w")" = - ] || reason+=", not mitigated: $(word unmitigated "$w")"
           [ "$(word overrides "$w")" = - ] || reason+=", pool override: $(word overrides "$w") (the operator removes it)"
+          [ "$(word apache_overrides "$w")" = - ] || reason+=", Apache override: $(word apache_overrides "$w") (the operator removes it)"
           ;;
       esac
     elif [ "$a_status" = unreachable ] || [ "$a_status" = timeout ] || [ "$(word reached "$a")" = no ]; then
@@ -54,6 +55,7 @@ for target in $(cut -f1 <<<"$newest" | sort -u); do
     elif [ "$(word unmitigated "$a")" != - ]; then
       step=ensure reason="not mitigated: $(word unmitigated "$a")"
       [ "$(word overrides "$a")" = - ] || reason+=", pool override: $(word overrides "$a") (the operator removes it)"
+      [ "$(word apache_overrides "$a")" = - ] || reason+=", Apache override: $(word apache_overrides "$a") (the operator removes it)"
     elif [ "$(word hook "$a")" = missing ] || [ "$(word hook "$a")" = outdated ]; then
       step=ensure reason="mitigated, but the apt hook that keeps it in place is $(word hook "$a")"
     else

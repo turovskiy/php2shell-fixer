@@ -1,11 +1,12 @@
-# Keeps the CVE-2026-115560 mitigation in place: session.upload_progress off in every web SAPI (FPM, CGI)
-# of every installed PHP branch. Writes 99-security.ini where it is missing or outdated, leaves CLI and
-# foreign files alone, and reloads only the FPM pools whose config changed. Installs an apt hook that runs
-# the same ensure after every dpkg run, so PHP branches installed later get it too. Idempotent.
+# Keeps the CVE-2026-115560 mitigation in place: session.upload_progress off in every web SAPI (FPM, mod_php,
+# CGI) of every installed PHP branch. Writes 99-security.ini where it is missing or outdated, leaves CLI and
+# foreign files alone, and reloads only the FPM pools, or Apache for a loaded mod_php, whose config changed.
+# Installs an apt hook that runs the same ensure after every dpkg run, so PHP branches installed later get it
+# too. Idempotent.
 # Runs as the tail of the bundle from run.sh (after versions.sh, p2s.sh, mitigation.sh): run.sh ensure <host>
-# Exit: 0 every web SAPI mitigated; 3 an override re-enables it, a foreign 99-security.ini, a SAPI still
-#       On or unknown, or the apt hook could not be written; 1 not root, a config test failed (change rolled
-#       back) or a reload failed.
+# Exit: 0 every web SAPI mitigated; 3 a pool or Apache override re-enables it, a foreign 99-security.ini, a
+#       SAPI still On or unknown, or the apt hook could not be written; 1 not root, a config test failed
+#       (change rolled back) or a reload failed.
 set -u
 export LC_ALL=C
 
@@ -19,7 +20,7 @@ fi
 
 P2S_RC=0 P2S_ROLLBACK=()
 sapis=$(p2s_web_sapis)
-[ -n "$sapis" ] || echo "no PHP-FPM or PHP-CGI installed"
+[ -n "$sapis" ] || echo "no PHP-FPM, mod_php or PHP-CGI installed"
 while read -r branch sapi; do
   [ -n "$branch" ] || continue
   p2s_ensure_sapi "$host" "$branch" "$sapi" yes

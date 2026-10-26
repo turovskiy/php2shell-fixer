@@ -1,32 +1,48 @@
-# PHP2Shell patch for PHP-FPM hosts. Two parts in one program:
+# PHP2Shell patch for PHP-FPM and mod_php hosts. Two parts in one program:
 # - the launcher (the tail of this file) runs in the ssh session: it starts the worker as a transient systemd
 #   unit, or attaches to a run still going, or hands back a finished run's log, and follows that log;
 # - the worker (p2s_fix_worker) is the patch itself, detached from ssh, so a dropped connection never
 #   stops apt halfway.
+# Per branch, one pinned install covers every SAPI; then each running SAPI gets its mitigation, its config
+# test (php-fpm -t for a pool, apachectl configtest for mod_php) and a restart of its service (the pool, or
+# apache2), and one "fix" record.
 # Runs as the tail of the bundle from run.sh (after versions.sh, p2s.sh, mitigation.sh, hostfacts.sh,
 # branch.sh): run.sh fix <host>
 # Server state: /var/lib/php2shell/fix-<stamp>.{log,exit,worker.sh,reported} and "current" (the last run).
 # Exit (the worker's, passed on): 0 every running branch fixed and HTTP unchanged; 3 a branch still unfixed
 #   (mitigation applied) or an HTTP status changed; 1 preflight failed, apt failed, a config test failed or a
-#   pool is down after its restart.
+#   pool or Apache is down after its restart.
 set -u
 export LC_ALL=C
 
 P2S_STATE=$(p2s_path /var/lib/php2shell)
 
-# HTTP status of every PHP site nginx serves, one "name code" per line, asked locally over 443.
+# HTTP status of every site nginx sends to PHP and every vhost Apache serves, one "name code" per line, asked
+# locally over 443. Both dumps are the effective config, so symlinked and included sites count; a name in
+# both is asked once.
 p2s_probe() {
-  local ngx n
-  ngx=$(nginx -T </dev/null 2>/dev/null) || return 0
-  p2s_nginx_sites "$ngx" | cut -d'|' -f1 | tr ',' '\n' | grep -E '^[A-Za-z0-9.-]+\.[A-Za-z]+$' | sort -u | head -25 \
+  local ngx aps n
+  {
+    if ngx=$(nginx -T </dev/null 2>/dev/null); then p2s_nginx_sites "$ngx" | cut -d'|' -f1 | tr ',' '\n'; fi
+    # apachectl -S prints warnings (AH00558) with the dump; the parser keeps only vhost lines.
+    if aps=$(apachectl -S </dev/null 2>&1); then p2s_apache_sites "$aps"; fi
+  } | grep -E '^[A-Za-z0-9.-]+\.[A-Za-z]+$' | sort -u | head -25 \
     | while read -r n; do
       printf '%s %s\n' "$n" "$(curl -sk -o /dev/null -m 15 -w '%{http_code}' --resolve "$n:443:127.0.0.1" "https://$n/" </dev/null)"
     done
 }
 
+# PHP modules a SAPI loads: php-fpm -m for FPM, the CLI with Apache's ini for mod_php.
+p2s_sapi_modules() { # $1 branch, $2 sapi
+  case $2 in
+    fpm) "php-fpm$1" -m </dev/null 2>/dev/null ;;
+    apache2) p2s_php_apache2 "$1" -m 2>/dev/null ;;
+  esac
+}
+
 # The patch. $1 run stamp. Returns 0, 1 or 3 as described at the top.
 p2s_fix_worker() {
-  local stamp=$1 host held upd urc fields backup before_probe after_probe pkgs
+  local stamp=$1 host held upd urc fields backup before_probe after_probe
   export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l LC_ALL=C
   host=$(hostname </dev/null)
   echo "== php2shell fix: $host ($(p2s_os)), run $stamp"
@@ -70,21 +86,31 @@ p2s_fix_worker() {
   echo "backup $backup"
   p2s_record kind=preflight host="$host" result=ok backup="$backup" sites="$(grep -c . <<<"$before_probe")"
 
-  local pkg before branch active after nver vafter rafter cve state restart mods ini85 mbefore changed
-  while IFS='|' read -r pkg before; do
-    [ -n "$pkg" ] || continue
-    branch=${pkg#php}
-    branch=${branch%-fpm}
+  local all branch b sapi pkg ver row running idle psapi ppkg before pkgs installed bstate after nver cve
+  local vafter rafter sbefore safter svafter unit state restart mods ini85 changed
+  local -A mbefore needed
+  all=$(p2s_branch_packages)
+  for branch in $(awk -F'|' '!seen[$1]++ {print $1}' <<<"$all"); do
     echo "== php$branch"
-    active=$(systemctl is-active "php$branch-fpm" </dev/null 2>/dev/null)
-    if [ "$active" != active ]; then
-      echo "php$branch-fpm is not running: left alone"
-      p2s_record kind=fix host="$host" branch="$branch" before="$before" after="$before" target=- fixed=- \
-        restart=skipped modules=- state=not-running
+    # The branch's SAPIs that serve requests now (FPM pool active, mod_php loaded by a running Apache).
+    running=() idle=()
+    while IFS='|' read -r b sapi pkg ver; do
+      [ "$b" = "$branch" ] || continue
+      if p2s_sapi_running "$branch" "$sapi"; then running+=("$sapi|$pkg|$ver"); else idle+=("$sapi|$pkg|$ver"); fi
+    done <<<"$all"
+    if [ ${#running[@]} -eq 0 ]; then
+      for row in "${idle[@]}"; do
+        IFS='|' read -r sapi pkg ver <<<"$row"
+        echo "php$branch $sapi is not running: left alone"
+        p2s_record kind=fix host="$host" branch="$branch" before="$ver" after="$ver" target=- fixed=- \
+          restart=skipped modules=- state=not-running sapi="$sapi"
+      done
       continue
     fi
-    # The same judgement as the audit, on the lists apt-get update just refreshed.
-    p2s_branch_eval "$host" "$branch" "$before"
+    # The same judgement as the audit, on the lists apt-get update just refreshed, through the first running
+    # SAPI's package: every package of the branch is pinned to the one target below.
+    IFS='|' read -r psapi ppkg before <<<"${running[0]}"
+    p2s_branch_eval "$host" "$branch" "$before" "$ppkg" "$psapi"
     [ ${#BR_CHUMAN[@]} -eq 0 ] || printf '%s\n' "${BR_CHUMAN[@]}"
     [ ${#BR_CRECORDS[@]} -eq 0 ] || printf '%s\n' "${BR_CRECORDS[@]}"
     # Every package built from the branch's source package (php8.3), by the source field and not by name:
@@ -92,10 +118,15 @@ p2s_fix_worker() {
     # versions, and pinning them to the PHP version would make apt refuse the whole install.
     pkgs=$(dpkg-query -W -f='${db:Status-Abbrev}|${binary:Package}|${source:Package}\n' "php$branch-*" "libapache2-mod-php$branch" </dev/null 2>/dev/null \
       | awk -F'|' -v s="php$branch" '$1 ~ /^ii/ && $3 == s {print $2}' | sort -u | paste -sd' ' -)
-    mbefore=$(php-fpm"$branch" -m </dev/null 2>/dev/null)
-    state="" restart=skipped changed=no
-    # A pool already on the build it should run needs no restart; one started before its last install does.
-    [ "$(p2s_restart_state "$branch" active | awk '{print $3}')" = needed ] && changed=yes
+    # Before the install: each SAPI's modules, and whether its service already runs an older build than the
+    # one installed (started before its last install), which needs a restart even without a new install.
+    mbefore=() needed=()
+    for row in "${running[@]}"; do
+      IFS='|' read -r sapi pkg ver <<<"$row"
+      mbefore[$sapi]=$(p2s_sapi_modules "$branch" "$sapi")
+      needed[$sapi]=$(p2s_restart_state "$branch" active "$sapi" | awk '{print $3}')
+    done
+    installed=no bstate=""
     if [ "$BR_TARGET" = none ]; then
       echo "php$branch: $before is $BR_VERDICT; no install ($BR_TREASON)"
     else
@@ -103,63 +134,79 @@ p2s_fix_worker() {
       # shellcheck disable=SC2046
       if apt-get -o DPkg::Lock::Timeout=600 -o Acquire::Retries=5 -o Dpkg::Options::=--force-confold \
         install -y -q --allow-downgrades $(for p in $pkgs; do printf '%s=%s ' "$p" "$BR_TARGET"; done) </dev/null; then
-        changed=yes
+        installed=yes
         P2S_ROLLBACK+=("apt-get install --allow-downgrades $(for p in $pkgs; do printf '%s=%s ' "$p" "$before"; done)")
       else
         echo "apt-get install failed"
-        state=apt-failed
+        bstate=apt-failed
         P2S_RC=1
       fi
     fi
-    after=$(dpkg-query -W -f='${Version}' "php$branch-fpm" </dev/null 2>/dev/null)
+    after=$(dpkg-query -W -f='${Version}' "$ppkg" </dev/null 2>/dev/null)
     # shellcheck disable=SC2086
     nver=$(dpkg-query -W -f='${Version}\n' $pkgs </dev/null 2>/dev/null | sort -u | grep -c .)
     [ "$nver" -le 1 ] || echo "WARNING: php$branch packages are on $nver different versions"
     cve=$(p2s_installed_cve "$branch")
     read -r vafter rafter <<<"$(p2s_verdict "$branch" "$after" "$(p2s_origin "$after")" "$cve")"
-    echo "php$branch-fpm now $after: $vafter ($rafter)"
+    echo "php$branch now $after: $vafter ($rafter)"
 
-    if [ -z "$state" ]; then
-      # The pool is restarted below, so ensure only writes and tests; it does not reload.
-      p2s_ensure_sapi "$host" "$branch" fpm no
-      [ "$P2S_EACTION" = test-failed ] && state=test-failed
-      [ "$P2S_EACTION" = written ] && changed=yes
-    fi
-    ini85=""
-    if [ -z "$state" ] && [ "$branch" = 8.5 ] && [ "$vafter" = unfixed ]; then
-      # The fatal error backtrace path of CVE-2026-109619 exists only in 8.5; closed until a fixed build lands.
-      ini85=$(p2s_path /etc/php/8.5/fpm/conf.d/99-php2shell-backtraces.ini)
-      printf '%s: CVE-2026-109619 backtrace path, until PHP 8.5 is fixed.\nfatal_error_backtraces = 0\n' "$P2S_INI_MARKER" >"$ini85"
-      P2S_ROLLBACK+=("rm ${ini85#"${P2S_ROOT:-}"} && systemctl restart php8.5-fpm")
-      changed=yes
-      echo "php8.5: fatal_error_backtraces = 0 written"
-    fi
-    if [ -z "$state" ] && [ "$changed" = no ]; then
-      restart=not-needed
-    elif [ -z "$state" ] && ! p2s_config_ok "$branch" fpm; then
-      [ -z "$ini85" ] || rm -f "$ini85"
-      echo "php$branch: config test failed; pool not restarted"
-      state=test-failed
-      P2S_RC=1
-    fi
-    if [ -z "$state" ] && [ "$changed" = yes ]; then
-      systemctl restart "php$branch-fpm" </dev/null
-      if [ "$(systemctl is-active "php$branch-fpm" </dev/null 2>/dev/null)" = active ]; then
-        restart=done
-      else
-        restart=failed state=pool-down
-        echo "php$branch-fpm is DOWN after its restart:"
-        journalctl -u "php$branch-fpm" -n 20 --no-pager </dev/null 2>&1
+    for row in "${running[@]}"; do
+      IFS='|' read -r sapi pkg sbefore <<<"$row"
+      unit=$(p2s_sapi_unit "$branch" "$sapi")
+      safter=$(dpkg-query -W -f='${Version}' "$pkg" </dev/null 2>/dev/null)
+      read -r svafter _ <<<"$(p2s_verdict "$branch" "$safter" "$(p2s_origin "$safter")" "$cve")"
+      state=$bstate restart=skipped changed=$installed
+      [ "${needed[$sapi]}" = needed ] && changed=yes
+      if [ -z "$state" ]; then
+        # The service is restarted below, so ensure only writes and tests; it does not reload.
+        p2s_ensure_sapi "$host" "$branch" "$sapi" no
+        [ "$P2S_EACTION" = test-failed ] && state=test-failed
+        [ "$P2S_EACTION" = written ] && changed=yes
+      fi
+      ini85=""
+      if [ -z "$state" ] && [ "$branch" = 8.5 ] && [ "$svafter" = unfixed ]; then
+        # The fatal error backtrace path of CVE-2026-109619 exists only in 8.5; closed until a fixed build lands.
+        ini85=$(p2s_path "/etc/php/8.5/$sapi/conf.d/99-php2shell-backtraces.ini")
+        printf '%s: CVE-2026-109619 backtrace path, until PHP 8.5 is fixed.\nfatal_error_backtraces = 0\n' "$P2S_INI_MARKER" >"$ini85"
+        P2S_ROLLBACK+=("rm ${ini85#"${P2S_ROOT:-}"} && systemctl restart $unit")
+        changed=yes
+        echo "php8.5 $sapi: fatal_error_backtraces = 0 written"
+      fi
+      if [ -z "$state" ] && [ "$changed" = no ]; then
+        restart=not-needed
+      elif [ -z "$state" ] && ! p2s_config_ok "$branch" "$sapi"; then
+        [ -z "$ini85" ] || rm -f "$ini85"
+        echo "php$branch $sapi: config test failed; $unit not restarted"
+        state=test-failed
         P2S_RC=1
       fi
-    fi
-    if [ "$(php-fpm"$branch" -m </dev/null 2>/dev/null)" = "$mbefore" ]; then mods=same; else mods=changed; fi
-    [ -n "$state" ] || state=$([ "$vafter" = fixed ] && echo fixed || echo unfixed-mitigated)
-    if [ "$state" = unfixed-mitigated ] && [ "$P2S_RC" = 0 ]; then P2S_RC=3; fi
-    p2s_record kind=fix host="$host" branch="$branch" before="$before" after="$after" target="$BR_TARGET" \
-      fixed="$([ "$vafter" = fixed ] && echo yes || echo no)" restart="$restart" modules="$mods" state="$state"
-  done <<<"$(dpkg-query -W -f='${db:Status-Abbrev}|${binary:Package}|${Version}\n' 'php*-fpm' </dev/null 2>/dev/null \
-    | awk -F'|' '$1 ~ /^ii/ && $2 ~ /^php[0-9]+\.[0-9]+-fpm$/ {print $2 "|" $3}')"
+      if [ -z "$state" ] && [ "$changed" = yes ]; then
+        systemctl restart "$unit" </dev/null
+        if [ "$(systemctl is-active "$unit" </dev/null 2>/dev/null)" = active ]; then
+          restart=done
+        else
+          restart=failed state=$([ "$sapi" = fpm ] && echo pool-down || echo apache-down)
+          echo "$unit is DOWN after its restart:"
+          journalctl -u "$unit" -n 20 --no-pager </dev/null 2>&1
+          P2S_RC=1
+        fi
+      fi
+      if [ "$(p2s_sapi_modules "$branch" "$sapi")" = "${mbefore[$sapi]}" ]; then mods=same; else mods=changed; fi
+      [ -n "$state" ] || state=$([ "$svafter" = fixed ] && echo fixed || echo unfixed-mitigated)
+      if [ "$state" = unfixed-mitigated ] && [ "$P2S_RC" = 0 ]; then P2S_RC=3; fi
+      p2s_record kind=fix host="$host" branch="$branch" before="$sbefore" after="$safter" target="$BR_TARGET" \
+        fixed="$([ "$svafter" = fixed ] && echo yes || echo no)" restart="$restart" modules="$mods" state="$state" \
+        sapi="$sapi"
+    done
+    # A SAPI that serves nothing now keeps running nothing: its packages moved with the branch, nothing more.
+    for row in "${idle[@]}"; do
+      IFS='|' read -r sapi pkg ver <<<"$row"
+      safter=$(dpkg-query -W -f='${Version}' "$pkg" </dev/null 2>/dev/null)
+      echo "php$branch $sapi is not running: not restarted"
+      p2s_record kind=fix host="$host" branch="$branch" before="$ver" after="$safter" target="$BR_TARGET" fixed=- \
+        restart=skipped modules=- state=not-running sapi="$sapi"
+    done
+  done
 
   echo "== http after"
   after_probe=$(p2s_probe)

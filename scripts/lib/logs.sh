@@ -39,30 +39,35 @@ p2s_newest_logs() { # $@ logs
 
 # What a log found, as one line of key=value words:
 # status (ok | exit-<n> | unreachable | timeout | none for a log without run_end), exit, reached (a host
-# record exists), unfixed and restart_needed (branches), unmitigated (branch/sapi:state), overrides
-# (file:line of pool overrides that re-enable upload progress), hook (the apt hook's state: present, missing,
-# outdated). "-" stands for none.
+# record exists), unfixed and restart_needed (branches; a SAPI other than FPM is named, 8.3/apache2),
+# unmitigated (branch/sapi:state), overrides (file:line of pool overrides that re-enable upload progress),
+# apache_overrides (the same for Apache config), hook (the apt hook's state: present, missing, outdated).
+# "-" stands for none.
 p2s_log_summary() { # $1 log
   awk '
-    function add(v, x) { return v == "" ? x : v "," x }
+    function add(v, x) { return v == "" ? x : (index("," v ",", "," x ",") ? v : v "," x) }
+    function bs() { return (r["sapi"] == "" || r["sapi"] == "fpm") ? r["branch"] : r["branch"] "/" r["sapi"] }
     /^@p2s schema=1 / {
       delete r
       for (i = 3; i <= NF; i++) { k = $i; sub(/=.*/, "", k); v = $i; sub(/^[^=]*=/, "", v); r[k] = v }
       if (r["kind"] == "host") reached = "yes"
       else if (r["kind"] == "run_end") { status = r["status"]; ex = r["exit"] }
       else if (r["kind"] == "branch") {
-        if (r["verdict"] != "fixed") unf = add(unf, r["branch"])
-        if (r["restart"] == "needed") rn = add(rn, r["branch"])
+        if (r["verdict"] != "fixed") unf = add(unf, bs())
+        if (r["restart"] == "needed") rn = add(rn, bs())
       }
-      else if (r["kind"] == "fix" && r["fixed"] == "no") unf = add(unf, r["branch"])
+      else if (r["kind"] == "fix" && r["fixed"] == "no") unf = add(unf, bs())
       else if (r["kind"] == "mitigation" && r["state"] != "mitigated") um = add(um, r["branch"] "/" r["sapi"] ":" r["state"])
-      else if (r["kind"] == "override" && r["enables"] == "yes") ov = add(ov, r["file"] ":" r["line"])
+      else if (r["kind"] == "override" && r["enables"] == "yes") {
+        if (r["sapi"] == "apache2") aov = add(aov, r["file"] ":" r["line"])
+        else ov = add(ov, r["file"] ":" r["line"])
+      }
       else if (r["kind"] == "ensure_hook") hook = r["state"]
     }
     END {
-      printf "status=%s exit=%s reached=%s unfixed=%s restart_needed=%s unmitigated=%s overrides=%s hook=%s\n",
+      printf "status=%s exit=%s reached=%s unfixed=%s restart_needed=%s unmitigated=%s overrides=%s apache_overrides=%s hook=%s\n",
         (status == "" ? "none" : status), (ex == "" ? "-" : ex), (reached == "" ? "no" : reached),
         (unf == "" ? "-" : unf), (rn == "" ? "-" : rn), (um == "" ? "-" : um), (ov == "" ? "-" : ov),
-        (hook == "" ? "-" : hook)
+        (aov == "" ? "-" : aov), (hook == "" ? "-" : hook)
     }' "$1"
 }

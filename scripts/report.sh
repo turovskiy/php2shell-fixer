@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Renders saved run logs as a markdown report, one section per host: a table of PHP-FPM branches (audit),
-# a table of the upload_progress mitigation per web SAPI (audit and ensure) with overrides below it, and
-# the host facts (audit): sites and pools, held packages, PPA sources, unattended-upgrades.
+# Renders saved run logs as a markdown report, one section per host: a table of PHP-FPM and mod_php
+# (SAPI apache2) branches (audit), a table of the upload_progress mitigation per web SAPI (audit and ensure)
+# with pool and Apache overrides below it, a table of patched SAPIs with the HTTP probe (fix), and the host
+# facts (audit): sites and pools, held packages, PPA sources, unattended-upgrades.
 # Reads only the "@p2s" records, so the report says exactly what the logged run found. Of several logs for
 # one host and mode, only the newest counts; a host the run could not reach gets a section saying so.
 # Usage: report.sh --latest     every run.sh log in ${P2S_CACHE:-$XDG_CACHE_HOME/php2shell}
@@ -42,14 +43,14 @@ flush() { # print the current host section
   fi
   if [ ${#overrides[@]} -gt 0 ]; then
     echo
-    echo 'Pool overrides of `session.upload_progress.enabled`:'
+    echo 'Pool and Apache overrides of `session.upload_progress.enabled`:'
     echo
     printf '%s\n' "${overrides[@]}"
   fi
   if [ ${#patches[@]} -gt 0 ]; then
     [ ${#branches[@]} -eq 0 ] || echo
-    echo '| Branch | Before | After | Target | Fixed | Restart | Modules | Result |'
-    echo '|---|---|---|---|---|---|---|---|'
+    echo '| Branch | SAPI | Before | After | Target | Fixed | Restart | Modules | Result |'
+    echo '|---|---|---|---|---|---|---|---|---|'
     printf '%s\n' "${patches[@]}"
   fi
   if [ ${#probes[@]} -gt 0 ]; then
@@ -155,8 +156,9 @@ while IFS=$'\t' read -r _ _ _ log; do
         case ${r[state]} in fixed) fs=fixed ;; *) fs="**${r[state]}**" ;; esac
         tg=${r[target]}
         [ "$tg" = none ] || [ "$tg" = - ] || tg="\`$tg\`"
-        patches+=("$(printf '| %s | `%s` | `%s` | %s | %s | %s | %s | %s |' "${r[branch]}" "${r[before]}" "${r[after]}" \
-          "$tg" "${r[fixed]}" "${r[restart]}" "${r[modules]}" "$fs")")
+        # Fix logs from before mod_php support carry no sapi field: those runs patched FPM only.
+        patches+=("$(printf '| %s | %s | `%s` | `%s` | %s | %s | %s | %s | %s |' "${r[branch]}" "${r[sapi]:-fpm}" "${r[before]}" \
+          "${r[after]}" "$tg" "${r[fixed]}" "${r[restart]}" "${r[modules]}" "$fs")")
         ;;
       probe)
         pr="- \`${r[name]}\`: ${r[before]} -> ${r[after]}"
@@ -211,7 +213,8 @@ while IFS=$'\t' read -r _ _ _ log; do
         origins+=("\`$(dec "${r[value]}")\`")
         ;;
       override)
-        o="- php${r[branch]} pool \`${r[pool]}\`: \`${r[file]}:${r[line]}\` ${r[directive]} = ${r[value]}"
+        if [ "${r[sapi]:-}" = apache2 ]; then o="- php${r[branch]} Apache: "; else o="- php${r[branch]} pool \`${r[pool]}\`: "; fi
+        o+="\`${r[file]}:${r[line]}\` ${r[directive]} = ${r[value]}"
         [ "${r[enables]}" = yes ] && o+=" - **re-enables it**"
         overrides+=("$o")
         ;;

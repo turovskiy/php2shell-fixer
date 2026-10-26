@@ -65,6 +65,7 @@ dpkglists() { # dpkglists <host> <date> <package>...
 dpkglists web-j '2026-10-22 06:00:00 UTC' php8.3-fpm php8.3-common
 dpkglists web-j '2026-10-24 06:00:00 UTC' php8.4-fpm
 dpkglists web-j '2026-10-24 07:00:00 UTC' php8.4-opcache
+dpkglists web-l '2026-10-22 06:00:00 UTC' libapache2-mod-php8.3 php8.3-common
 # apt-helper is called by absolute path, so it goes into the fake root of every host with remote/ fixtures:
 # "download-file URL DEST" copies remote/<URL with / and : as _> to DEST.
 for h in "$WORK"/hosts/*/; do
@@ -100,6 +101,9 @@ derive web-s slow-install 3                        # connection drops mid-upgrad
 echo 1 >"$WORK/hosts/web-s/drop-after"
 derive web-u slow-install 5                        # connection drops; next run attaches to the running unit
 echo 1 >"$WORK/hosts/web-u/drop-after"
+# mod_php hosts: web-w is web-l with an Apache config that fails its configtest.
+cp -r "$WORK/hosts/web-l" "$WORK/hosts/web-w"
+: >"$WORK/hosts/web-w/fail-configtest"
 for h in "$WORK"/hosts/*/root; do mkdir -p "$h/root"; done   # /root, where the patcher keeps its backup
 
 # Stubs, first on PATH. ssh runs the streamed program locally against the named host's fake root.
@@ -242,10 +246,20 @@ echo "systemd[1]: $u.service: Main process exited, code=exited, status=78/CONFIG
 echo "systemd[1]: Failed to start $u.service - The PHP FastCGI Process Manager."'
 # SAPI binaries: the effective upload_progress comes from the fake root's ini files, last assignment wins
 # (php.ini, then conf.d in order). A host without /etc/php/<X.Y>/<sapi> behaves as if the binary failed.
+# The CLI binary php<X.Y> reads its php.ini from "-c <file>" and its conf.d from PHP_INI_SCAN_DIR, as PHP
+# does, so it answers for mod_php when given Apache's ini; without them it reads its own cli/ dir.
 # fail-t-<binary> in the host fixture makes the config test fail (FPM: exit 78; CGI: an ini error on stderr).
 SAPI_STUB='n=${0##*/}
-case $n in php-fpm*) s=fpm b=${n#php-fpm} ;; *) s=cgi b=${n#php-cgi} ;; esac
-d=$P2S_ROOT/etc/php/$b/$s
+case $n in
+  php-fpm*) s=fpm b=${n#php-fpm} ;;
+  php-cgi*) s=cgi b=${n#php-cgi} ;;
+  *) s=cli b=${n#php} ;;
+esac
+d=$P2S_ROOT/etc/php/$b/$s ini=$d/php.ini scan=$d/conf.d
+if [ "$s" = cli ]; then
+  scan=${PHP_INI_SCAN_DIR:-$scan}
+  [ "${1:-}" = -c ] && { ini=$2 d=$(dirname "$2"); shift 2; }
+fi
 case $1 in
   -t)
     [ -e "$P2S_STUB/fail-t-$n" ] && { echo "ERROR: failed to load configuration file $d/conf.d/99-security.ini" >&2; exit 78; }
@@ -258,23 +272,37 @@ case $1 in
   -i)
     [ -d "$d" ] || exit 1
     v=On
-    for f in "$d/php.ini" "$d"/conf.d/*.ini; do
+    for f in "$ini" "$scan"/*.ini; do
       [ -f "$f" ] || continue
       x=$(sed -nE "s/^[[:space:]]*session\.upload_progress\.enabled[[:space:]]*=[[:space:]]*\"?([^\";[:space:]]+).*/\1/p" "$f" | tail -1)
       [ -n "$x" ] || continue
       case ${x,,} in 0 | off | false | no) v=Off ;; *) v=On ;; esac
     done
-    if [ "$s" = fpm ]; then echo "session.upload_progress.enabled => $v => $v"
-    else echo "<tr><td class=\"e\">session.upload_progress.enabled</td><td class=\"v\">$v</td><td class=\"v\">$v</td></tr>"; fi ;;
+    if [ "$s" = cgi ]; then echo "<tr><td class=\"e\">session.upload_progress.enabled</td><td class=\"v\">$v</td><td class=\"v\">$v</td></tr>"
+    else echo "session.upload_progress.enabled => $v => $v"; fi ;;
 esac'
-for b in 7.4 8.1 8.2 8.3 8.4 8.5; do stub "php-fpm$b" "$SAPI_STUB"; stub "php-cgi$b" "$SAPI_STUB"; done
+for b in 7.4 8.1 8.2 8.3 8.4 8.5; do stub "php-fpm$b" "$SAPI_STUB"; stub "php-cgi$b" "$SAPI_STUB"; stub "php$b" "$SAPI_STUB"; done
+# apachectl: absent (127) without /etc/apache2 in the fake root; "configtest" fails on fail-configtest in the
+# host fixture; "-S" prints the host's apachectl-S.txt, the vhost dump as Apache prints it.
+stub apachectl '[ -d "$P2S_ROOT/etc/apache2" ] || { echo "apachectl: command not found" >&2; exit 127; }
+case $1 in
+  configtest)
+    if [ -e "$P2S_STUB/fail-configtest" ]; then
+      echo "AH00526: Syntax error on line 4 of /etc/apache2/sites-enabled/shop.conf:" >&2
+      echo "Action '"'"'configtest'"'"' failed." >&2
+      exit 1
+    fi
+    echo "Syntax OK" >&2 ;;
+  -S) cat "$P2S_STUB/apachectl-S.txt" 2>/dev/null ;;
+esac
+exit 0'
 export PATH="$WORK/bin:$PATH"
 # The audit's temp dir on the "host": must be empty again after every run.
 export TMPDIR=$WORK/hosttmp
 mkdir -p "$TMPDIR"
 
 # Calls an audit may make; anything else in the stub log is a write or a package operation.
-READ_ONLY='^(ssh (-o [^ ]+ )*[^ ]+ bash -s|hostname ?|dpkg-query .*|systemctl is-active [^ ]+|systemctl show -p ActiveEnterTimestamp --value [^ ]+|dpkg --compare-versions .*|apt-cache madison [^ ]+|apt-get download -q [^ ]+|dpkg-deb --fsys-tarfile [^ ]+|php-(fpm|cgi)[0-9.]+ -i|apt-mark showhold|apt-config dump|nginx -T|apt-helper .* download-file [^ ]+ [^ ]+)$'
+READ_ONLY='^(ssh (-o [^ ]+ )*[^ ]+ bash -s|hostname ?|dpkg-query .*|systemctl is-active [^ ]+|systemctl show -p ActiveEnterTimestamp --value [^ ]+|dpkg --compare-versions .*|apt-cache madison [^ ]+|apt-get download -q [^ ]+|dpkg-deb --fsys-tarfile [^ ]+|php-(fpm|cgi)[0-9.]+ -i|php[0-9.]+ -c [^ ]+ -i|apt-mark showhold|apt-config dump|nginx -T|apt-helper .* download-file [^ ]+ [^ ]+)$'
 fingerprint() { (cd "$WORK/hosts" && find . -type f -exec md5sum {} + | sort); }
 
 echo "▸ verdict (installed build)"
@@ -355,6 +383,21 @@ $(yes_no p2s_listen_matches 127.0.0.1:9000 localhost:9000) \
 $(yes_no p2s_listen_matches 127.0.0.1:9000 127.0.0.1:9001) \
 $(yes_no p2s_listen_matches 10.0.0.5:9000 127.0.0.1:9000)" \
   "yes no yes yes no no" "listen vs fastcgi_pass: /var/run is /run, bare port, loopback names, port and address mismatch"
+AS='AH00558: apache2: Could not reliably determine the server'"'"'s fully qualified domain name
+VirtualHost configuration:
+*:443                  is a NameVirtualHost
+         default server shop.example.com (/etc/apache2/sites-enabled/shop.conf:1)
+         port 443 namevhost shop.example.com (/etc/apache2/sites-enabled/shop.conf:1)
+                 alias www.shop.example.com
+                 wild alias *.shop.example.com
+         port 443 namevhost blog.example.org (/etc/apache2/sites-enabled/blog.conf:1)
+*:80                   static.example.net (/etc/apache2/sites-enabled/static.conf:1)
+[2001:db8::1]:443      v6.example.com (/etc/apache2/sites-enabled/v6.conf:1)
+ServerRoot: "/etc/apache2"
+Main DocumentRoot: "/var/www/html"
+User: name="www-data" id=33'
+eq "$(p2s_apache_sites "$AS")" "$(printf '%s\n' blog.example.org shop.example.com static.example.net v6.example.com www.shop.example.com)" \
+  "apachectl -S: name-based vhosts, aliases and single vhosts, once each; wildcard aliases and settings skipped"
 eq "$(p2s_inrelease_name https://ppa.launchpadcontent.net/ondrej/php/ubuntu/ noble)" \
   "ppa.launchpadcontent.net_ondrej_php_ubuntu_dists_noble_InRelease" "cached InRelease name, trailing slash ignored"
 eq "$(p2s_release_info "$(printf 'Origin: X\nLabel: A B\nDate: now\nSuite: noble\n')")" "$(printf 'Label: A B\nOrigin: X\nSuite: noble')" \
@@ -493,6 +536,29 @@ has "$A" "kind=mitigation host=web-a branch=8.3 sapi=fpm ini=absent action=inspe
   "web-a: SAPI without readable config -> unknown, not mitigated"
 hasnt "$C" "kind=mitigation" "web-c: CLI only -> no mitigation records"
 
+echo "▸ audit: mod_php"
+L=$(bash "$S/run.sh" audit web-l); code=$?
+eq "$code" 0 "web-l: exit 0"
+has "$L" "kind=branch host=web-l branch=8.3 sapi=apache2 installed=8.3.6-0ubuntu0.24.04.12 origin=distro active=active cve_changelog=no verdict=unfixed reason=below-threshold target=8.3.6-0ubuntu0.24.04.13 target_reason=fixed-candidate" \
+  "web-l: Apache with mod_php 8.3 recorded as SAPI apache2, with its verdict and target"
+has "$L" "started=2026-10-20T06:00:00Z installed_at=2026-10-22T06:00:00Z restart=needed" \
+  "web-l: Apache started before the mod_php install -> restart needed"
+has "$L" "kind=candidate host=web-l branch=8.3 version=8.3.6-0ubuntu0.24.04.13 origin=distro cve_changelog=yes verdict=fixed reason=distro-threshold sapi=apache2" \
+  "web-l: mod_php candidate judged from its changelog"
+has "$L" "kind=mitigation host=web-l branch=8.3 sapi=apache2 ini=absent action=inspected upload_progress=On overrides=0 state=not-mitigated" \
+  "web-l: upload_progress read with Apache's php.ini and conf.d"
+hasnt "$L" "sapi=cli" "web-l: CLI is not a web SAPI"
+hasnt "$L" "sapi=fpm" "web-l: no FPM on a mod_php-only host"
+
+Va=$(bash "$S/run.sh" audit web-v)
+has "$Va" "kind=branch host=web-v branch=7.4 sapi=apache2 installed=1:7.4.33-31+ubuntu24.04.1+deb.sury.org+1 origin=ppa active=not-loaded" \
+  "web-v: mod_php 7.4 installed but not loaded by Apache -> not-loaded"
+has "$Va" "branch=7.4 sapi=apache2 installed=1:7.4.33-31+ubuntu24.04.1+deb.sury.org+1" "web-v: 7.4 record present"
+has "$Va" "kind=override host=web-v branch=8.3 sapi=apache2 file=/etc/apache2/sites-enabled/shop.conf line=6 pool=- directive=php_admin_flag value=on enables=yes" \
+  "web-v: audit finds the Apache override through the sites-enabled symlink"
+has "$Va" "kind=mitigation host=web-v branch=8.3 sapi=apache2 ini=absent action=inspected upload_progress=On overrides=1 state=override" \
+  "web-v: audit reports the override state"
+
 echo "▸ audit: read-only"
 WRITES=$(grep -vE "$READ_ONLY" "$STUB_LOG")
 eq "$WRITES" "" "no write command or package operation in the stub log"
@@ -551,6 +617,27 @@ eq "$(grep -E '^systemctl (reload|restart|stop) ' "$STUB_LOG")" "" "web-i: pool 
 has "$I" "action=test-failed" "web-i: test failure recorded"
 has "$I" "ERROR: failed to load configuration file" "web-i: config test output shown"
 
+echo "▸ ensure: mod_php"
+: >"$STUB_LOG"
+V=$(bash "$S/run.sh" ensure web-v); code=$?
+eq "$code" 3 "web-v: Apache-level override -> exit 3"
+eq "$(ini web-v 8.3/apache2)" "$INI" "web-v: 8.3 apache2 ini written"
+eq "$(ini web-v 7.4/apache2)" "$INI" "web-v: ini written for an installed mod_php Apache does not load yet"
+eq "$(ini web-v 8.3/cli)" "" "web-v: CLI conf.d untouched"
+has "$V" "kind=override host=web-v branch=8.3 sapi=apache2 file=/etc/apache2/sites-enabled/shop.conf line=6 pool=- directive=php_admin_flag value=on enables=yes" \
+  "web-v: Apache override named with file and line"
+has "$V" "/etc/apache2/sites-enabled/shop.conf:6" "web-v: file and line in the human section too"
+has "$V" "kind=override host=web-v branch=8.3 sapi=apache2 file=/etc/apache2/conf-enabled/uploads.conf line=2 pool=- directive=php_value value=0 enables=no" \
+  "web-v: disabling override recorded, directive name in any case"
+hasnt "$V" "line=5 pool=-" "web-v: commented-out Apache override ignored"
+hasnt "$V" "old.conf" "web-v: a site that is not enabled is not scanned"
+has "$V" "kind=mitigation host=web-v branch=8.3 sapi=apache2 ini=absent action=written upload_progress=Off overrides=1 state=override" \
+  "web-v: ini Off but Apache re-enables it -> override"
+has "$V" "kind=mitigation host=web-v branch=7.4 sapi=apache2 ini=absent action=written-not-running upload_progress=Off overrides=0 state=mitigated" \
+  "web-v: 7.4 not loaded -> written, nothing reloaded for it, no Apache overrides counted"
+eq "$(grep -E '^systemctl (reload|restart|stop|start) ' "$STUB_LOG")" "systemctl reload apache2" "web-v: Apache reloaded once, nothing restarted"
+has "$V" "rm /etc/php/8.3/apache2/conf.d/99-security.ini && systemctl reload apache2" "web-v: rollback line reloads Apache"
+
 BEFORE_ROOT=$(fingerprint)
 NR=$(STUB_UID=1000 bash "$S/run.sh" ensure web-h); code=$?
 eq "$code" 1 "not root: exit 1"
@@ -595,6 +682,15 @@ printf '#!/bin/sh\nexit 7\n' >"$WORK/bin/failing-hook"; chmod +x "$WORK/bin/fail
 CMD=$(sed -nE 's/.*Post-Invoke \{ "(.*)"; \};/\1/p' "$HC" | sed "s#/usr/local/sbin/php2shell-ensure#$WORK/bin/failing-hook#g")
 bash -c "$CMD"; code=$?
 eq "$code" 0 "apt's Post-Invoke command exits 0 even when the hook exits 7"
+
+# Apache with mod_php installed later: the hook gives it the ini too.
+printf 'ii |libapache2-mod-php8.3|8.3.6-0ubuntu0.24.04.13\n' >>"$WORK/hosts/web-f/dpkg-query.txt"
+mkdir -p "$WORK/hosts/web-f/root/etc/php/8.3/apache2/conf.d" "$WORK/hosts/web-f/root/etc/apache2"
+P2S_STUB=$WORK/hosts/web-f STUB_HOST=web-f "$HK"; code=$?
+eq "$code" 0 "hook run with a new mod_php: exit 0"
+eq "$(ini web-f 8.3/apache2)" "$INI" "hook run: the new mod_php got its ini"
+has "$(cat "$HL")" "kind=mitigation host=web-f branch=8.3 sapi=apache2 ini=absent action=written-not-running upload_progress=Off" \
+  "hook run: mod_php logged, Apache not running so nothing reloaded"
 
 H1=$(bash "$S/run.sh" audit web-f)
 has "$H1" "kind=ensure_hook host=web-f state=present" "audit: hook present"
@@ -696,8 +792,65 @@ eq "$(ls "$WORK/hosts/web-u/units/" | wc -l)" 1 "web-u: no second patch while on
 U3=$(bash "$S/run.sh" fix web-u); code=$?
 has "$U3" "patch started as unit" "web-u: a run reported once lets the next call start a new patch"
 
+echo "▸ fix: mod_php"
+: >"$STUB_LOG"
+We=$(bash "$S/run.sh" ensure web-w); code=$?
+eq "$code" 1 "web-w ensure: apachectl configtest fails -> exit 1"
+eq "$(ls "$WORK/hosts/web-w/root/etc/php/8.3/apache2/conf.d/99-security.ini" 2>/dev/null)" "" "web-w ensure: new ini removed"
+has "$We" "branch=8.3 sapi=apache2 ini=absent action=test-failed" "web-w ensure: failed configtest recorded"
+has "$We" "AH00526: Syntax error" "web-w ensure: configtest output shown"
+eq "$(grep -E '^systemctl (reload|restart|stop) ' "$STUB_LOG")" "" "web-w ensure: Apache neither reloaded nor restarted"
+: >"$STUB_LOG"
+Wf=$(bash "$S/run.sh" fix web-w); code=$?
+eq "$code" 1 "web-w fix: apachectl configtest fails -> exit 1"
+has "$(grep -E '^apt-get .* install ' "$STUB_LOG")" "libapache2-mod-php8.3=8.3.6-0ubuntu0.24.04.13" "web-w fix: mod_php pinned to the target"
+eq "$(ls "$WORK/hosts/web-w/root/etc/php/8.3/apache2/conf.d/99-security.ini" 2>/dev/null)" "" "web-w fix: new ini removed"
+has "$(grep '^apachectl ' "$STUB_LOG")" "apachectl configtest" "web-w fix: Apache config tested"
+eq "$(grep -E '^systemctl (reload|restart|stop) ' "$STUB_LOG")" "" "web-w fix: Apache not restarted"
+has "$Wf" "kind=fix host=web-w branch=8.3 before=8.3.6-0ubuntu0.24.04.12 after=8.3.6-0ubuntu0.24.04.13 target=8.3.6-0ubuntu0.24.04.13 fixed=yes restart=skipped modules=same state=test-failed sapi=apache2" \
+  "web-w fix: installed, but Apache left alone on the failed configtest"
+
+# mod_php only, no nginx: the probe finds the sites through apachectl -S.
+: >"$STUB_LOG"
+Lf=$(bash "$S/run.sh" fix web-l); code=$?
+eq "$code" 0 "web-l fix: mod_php fixed, exit 0"
+has "$Lf" "kind=fix host=web-l branch=8.3 before=8.3.6-0ubuntu0.24.04.12 after=8.3.6-0ubuntu0.24.04.13 target=8.3.6-0ubuntu0.24.04.13 fixed=yes restart=done modules=same state=fixed sapi=apache2" \
+  "web-l fix: installed, Apache restarted"
+eq "$(grep -E '^systemctl (restart|reload) ' "$STUB_LOG")" "systemctl restart apache2" "web-l fix: Apache restarted once"
+has "$Lf" "kind=probe host=web-l name=shop.example.com before=200 after=200" "web-l fix: Apache vhost probed before and after"
+has "$Lf" "kind=probe_summary host=web-l state=unchanged" "web-l fix: Apache-only host is not 'no sites'"
+
+# One branch served by both FPM and mod_php: one pinned install, both SAPIs mitigated, tested, restarted.
+: >"$STUB_LOG"
+X=$(bash "$S/run.sh" fix web-x); code=$?
+eq "$code" 0 "web-x: FPM and mod_php of 8.3 fixed in one run, exit 0"
+INSTALL=$(grep -E '^apt-get .* install ' "$STUB_LOG")
+eq "$(grep -c . <<<"$INSTALL")" 1 "web-x: one install for the branch"
+has "$INSTALL" "php8.3-fpm=8.3.6-0ubuntu0.24.04.13" "web-x: FPM package pinned to the target"
+has "$INSTALL" "libapache2-mod-php8.3=8.3.6-0ubuntu0.24.04.13" "web-x: mod_php package pinned to the same target"
+has "$X" "kind=fix host=web-x branch=8.3 before=8.3.6-0ubuntu0.24.04.12 after=8.3.6-0ubuntu0.24.04.13 target=8.3.6-0ubuntu0.24.04.13 fixed=yes restart=done modules=same state=fixed sapi=fpm" \
+  "web-x: FPM patched and restarted"
+has "$X" "kind=fix host=web-x branch=8.3 before=8.3.6-0ubuntu0.24.04.12 after=8.3.6-0ubuntu0.24.04.13 target=8.3.6-0ubuntu0.24.04.13 fixed=yes restart=done modules=same state=fixed sapi=apache2" \
+  "web-x: mod_php patched and Apache restarted"
+eq "$(grep -E '^systemctl (restart|reload) ' "$STUB_LOG" | sort)" "$(printf 'systemctl restart apache2\nsystemctl restart php8.3-fpm')" \
+  "web-x: the pool and Apache restarted once each, no reload"
+has "$(grep -E '^(php-fpm8.3 -t|apachectl configtest)' "$STUB_LOG" | sort -u)" "$(printf 'apachectl configtest\nphp-fpm8.3 -t')" "web-x: both config tests ran"
+has "$X" "kind=mitigation host=web-x branch=8.3 sapi=apache2 ini=absent action=written upload_progress=Off overrides=0 state=mitigated" \
+  "web-x: mod_php mitigated"
+has "$X" "kind=mitigation host=web-x branch=8.3 sapi=fpm ini=absent action=written upload_progress=Off overrides=0 state=mitigated" \
+  "web-x: FPM mitigated"
+has "$X" "rm /etc/php/8.3/apache2/conf.d/99-security.ini && systemctl reload apache2" "web-x: rollback line for the mod_php ini"
+has "$X" "kind=probe host=web-x name=api.example.com before=200 after=200" "web-x: nginx site probed"
+has "$X" "kind=probe host=web-x name=shop.example.com before=200 after=200" "web-x: Apache vhost probed"
+has "$X" "kind=probe host=web-x name=www.shop.example.com before=301 after=301" "web-x: Apache alias probed"
+has "$X" "kind=probe host=web-x name=blog.example.org before=200 after=200" "web-x: second Apache vhost probed"
+eq "$(grep -c 'kind=probe host=web-x name=shop.example.com ' <<<"$X")" 1 "web-x: a vhost listed as default server and as namevhost probed once"
+XR=$(bash "$S/report.sh" "$(ls "$P2S_CACHE"/web-x-fix-*.log)")
+has "$XR" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.12` | `8.3.6-0ubuntu0.24.04.13` | `8.3.6-0ubuntu0.24.04.13` | yes | done | same | fixed |' "report: FPM patch row"
+has "$XR" '| 8.3 | apache2 | `8.3.6-0ubuntu0.24.04.12` | `8.3.6-0ubuntu0.24.04.13` | `8.3.6-0ubuntu0.24.04.13` | yes | done | same | fixed |' "report: mod_php patch row"
+
 PR=$(bash "$S/report.sh" "$(ls "$P2S_CACHE"/web-m-fix-*.log)" "$(ls "$P2S_CACHE"/web-q-fix-*.log)" "$(ls "$P2S_CACHE"/web-t-fix-*.log)")
-has "$PR" '| 8.3 | `8.3.6-0ubuntu0.24.04.12` | `8.3.6-0ubuntu0.24.04.13` | `8.3.6-0ubuntu0.24.04.13` | yes | done | same | fixed |' "report: patch row"
+has "$PR" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.12` | `8.3.6-0ubuntu0.24.04.13` | `8.3.6-0ubuntu0.24.04.13` | yes | done | same | fixed |' "report: patch row"
 has "$PR" "- Backup before the patch: \`/root/etc-php-" "report: backup named"
 has "$PR" "- HTTP probe: every status code unchanged" "report: probe unchanged"
 has "$PR" '- **Preflight stopped the patch: held**, held: `php8.3-fpm`' "report: preflight stop"
@@ -772,6 +925,11 @@ has "$NX" "fix-ok: verify - fix finished after the last audit" "next: successful
 has "$NX" "fix-partial: fix - last fix: exit-3, unfixed: php8.4" "next: fix that left a branch unfixed names it"
 has "$NX" "hook-missing: ensure - mitigated, but the apt hook that keeps it in place is missing" "next: missing apt hook -> ensure"
 eq "$(wc -l <<<"$NX")" 13 "next: one line per host"
+NL=$(bash "$S/next.sh" "$(ls "$P2S_CACHE"/web-l-audit-*.log)")
+eq "$NL" "web-l: fix - unfixed: php8.3/apache2" "next: unfixed mod_php named with its SAPI"
+NV=$(bash "$S/next.sh" "$P2S_CACHE"/web-v-*.log)
+eq "$NV" "web-v: ensure - last ensure: exit-3, not mitigated: 8.3/apache2:override, Apache override: /etc/apache2/sites-enabled/shop.conf:6 (the operator removes it)" \
+  "next: an Apache override is named as one, with file and line"
 bash "$S/next.sh" >/dev/null 2>&1; code=$?
 eq "$code" 2 "next: no arguments -> exit 2"
 
@@ -792,6 +950,13 @@ has "$R" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.12` | distro | inactive | not-runn
 has "$R" '| below-threshold | none (no-fixed-build-in-cached-lists) |' "report: no target shows its reason"
 has "$R" '| distro-threshold | none (installed-fixed) |' "report: fixed branch shows installed-fixed"
 hasnt "$R" "kind=candidate" "report: candidate records not dumped"
+LR=$(bash "$S/report.sh" "$(ls "$P2S_CACHE"/web-l-audit-*.log)")
+has "$LR" '| 8.3 | apache2 | `8.3.6-0ubuntu0.24.04.12` | distro | active | **needed** (started 2026-10-20, installed 2026-10-22) | no | **unfixed** | below-threshold | `8.3.6-0ubuntu0.24.04.13` |' \
+  "report: mod_php branch row"
+VR=$(bash "$S/report.sh" "$(ls "$P2S_CACHE"/web-v-ensure-*.log)")
+has "$VR" '| 8.3 | apache2 | absent | written | Off | 1 | **override** |' "report: mod_php mitigation row"
+has "$VR" '- php8.3 Apache: `/etc/apache2/sites-enabled/shop.conf:6` php_admin_flag = on - **re-enables it**' \
+  "report: Apache override listed as Apache's, with file and line"
 printf '@p2s schema=1 kind=host host=old os=ubuntu-24.04\n@p2s schema=1 kind=branch host=old branch=8.3 sapi=fpm installed=8.3.6-0ubuntu0.24.04.13 origin=distro active=active cve_changelog=yes verdict=fixed reason=distro-threshold\n' >"$WORK/old.log"
 JR=$(bash "$S/report.sh" "$(ls "$P2S_CACHE"/web-j-audit-*.log)")
 has "$JR" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.13` | distro | active | **needed** (started 2026-10-20, installed 2026-10-22) |' "report: restart needed with both dates"
