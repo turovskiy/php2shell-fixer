@@ -29,6 +29,15 @@ mkdir -p "$(dirname "$LONG")"
   echo '  * Fix CVE-2026-109618 and CVE-2026-109619 (PHP2Shell)'
   for i in $(seq 1 100); do echo "  * Older entry $i"; done
 } >"$LONG"
+# web-b php8.1: the CVE lines in the top entry of a changelog several pipe buffers long. A reader that stops
+# early ("zcat | head | grep -q" under pipefail) kills zcat with SIGPIPE and reads a match as a failure.
+TOP=$WORK/hosts/web-b/root/usr/share/doc/php8.1-common/changelog.Debian
+mkdir -p "$(dirname "$TOP")"
+{
+  echo 'php8.1 (8.1.34-9+ubuntu24.04.1+deb.sury.org+1) noble; urgency=medium'
+  echo '  * Fix CVE-2026-109618 and CVE-2026-109619 (PHP2Shell)'
+  for i in $(seq 1 2000); do echo "  * Older entry $i: backported upstream fix for the 8.1 branch, no security impact"; done
+} >"$TOP"
 find "$WORK/hosts" -name changelog.Debian -exec gzip -n {} \;
 
 # Stubs, first on PATH. ssh runs the streamed program locally against the named host's fake root.
@@ -105,6 +114,10 @@ has "$B" "branch=8.4 sapi=fpm installed=8.4.17-1+ubuntu24.04.1+deb.sury.org+1 or
   "web-b: sury 8.4.17 unfixed"
 has "$B" "branch=8.3 sapi=fpm installed=8.3.6-0ubuntu0.24.04.12 origin=distro active=inactive cve_changelog=no verdict=unfixed reason=below-threshold" \
   "web-b: Ubuntu 8.3 .12 unfixed, service inactive"
+[ "$(zcat "$TOP.gz" | wc -c)" -gt $((2 * 65536)) ] && ok "top-entry changelog is several pipe buffers long" \
+  || bad "top-entry changelog is several pipe buffers long"
+has "$B" "branch=8.1 sapi=fpm installed=8.1.34-9+ubuntu24.04.1+deb.sury.org+1 origin=ppa active=active cve_changelog=yes verdict=fixed reason=changelog" \
+  "web-b: 8.1 fixed by CVE lines in the top entry of a long changelog (SIGPIPE)"
 
 C=$(bash "$S/run.sh" audit web-c); code=$?
 eq "$code" 0 "web-c: exit 0 without PHP-FPM"

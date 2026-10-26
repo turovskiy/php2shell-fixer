@@ -1,1 +1,2 @@
 php8.4-fpm
+php8.1-fpm
