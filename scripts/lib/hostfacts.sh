@@ -47,15 +47,19 @@ p2s_nginx_sites() { # $1 nginx -T output
     }' <<<"$1"
 }
 
-# Site names from "apachectl -S" output (Apache's own vhost dump, so symlinked and included sites count),
-# one per line, sorted, each once: name-based vhosts ("port 443 namevhost <name>", "default server <name>"),
-# their aliases, and single vhosts ("*:80 <name> (<file>:<line>)"). Wildcard aliases are skipped.
+# Vhosts from "apachectl -S" output (Apache's own vhost dump, so symlinked and included sites count), one
+# "name|port|address" per line, sorted, each once: name-based vhosts ("port 443 namevhost <name>", "default
+# server <name>") under their "<address>:<port> is a NameVirtualHost" line, their aliases, and single vhosts
+# ("*:80 <name> (<file>:<line>)"). The address is "-" for any (* or _default_). Wildcard aliases are skipped.
 p2s_apache_sites() { # $1 apachectl -S output
   awk '
-    $1 == "port" && $3 == "namevhost" { print $4; next }
-    $1 == "default" && $2 == "server" { print $3; next }
-    $1 == "alias" { print $2; next }
-    $1 ~ /:[0-9]+$/ && $3 ~ /^\(/ { print $2 }' <<<"$1" | sort -u
+    function at(ap) { port = ap; sub(/^.*:/, "", port); addr = ap; sub(/:[^:]*$/, "", addr)
+      if (addr == "*" || addr == "_default_") addr = "-" }
+    $1 ~ /:[0-9]+$/ && $2 == "is" && $3 == "a" { at($1); next }
+    $1 == "port" && $3 == "namevhost" { port = $2; print $4 "|" port "|" addr; next }
+    $1 == "default" && $2 == "server" { print $3 "|" port "|" addr; next }
+    $1 == "alias" { print $2 "|" port "|" addr; next }
+    $1 ~ /:[0-9]+$/ && $3 ~ /^\(/ { at($1); print $2 "|" port "|" addr }' <<<"$1" | sort -u
 }
 
 # Do an FPM listen address and an nginx fastcgi_pass point at the same socket?

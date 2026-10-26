@@ -101,6 +101,10 @@ derive web-s slow-install 3                        # connection drops mid-upgrad
 echo 1 >"$WORK/hosts/web-s/drop-after"
 derive web-u slow-install 5                        # connection drops; next run attaches to the running unit
 echo 1 >"$WORK/hosts/web-u/drop-after"
+# web-x's Apache listens on 127.0.0.1:8080 behind nginx: its vhosts answer plain http there and nowhere else.
+# Written here, not in the fixture: fixtures carry only package archive URLs.
+printf '%s\n' 'api.example.com 200 200' 'http://shop.example.com:8080 200 200 127.0.0.1' \
+  'http://www.shop.example.com:8080 301 301 127.0.0.1' 'http://blog.example.org:8080 200 200 127.0.0.1' >"$WORK/hosts/web-x/http.txt"
 # mod_php hosts: web-w is web-l with an Apache config that fails its configtest.
 cp -r "$WORK/hosts/web-l" "$WORK/hosts/web-w"
 : >"$WORK/hosts/web-w/fail-configtest"
@@ -388,13 +392,25 @@ while [ $# -gt 0 ]; do case $1 in --unit=*) unit=${1#--unit=} ;; --*) ;; *) brea
 mkdir -p "$P2S_STUB/units"
 setsid "$@" </dev/null >/dev/null 2>&1 &
 echo $! >"$P2S_STUB/units/$unit.pid"'
-# curl ... https://<name>/: http.txt holds "<name> <code before> <code after>"; the first call per name
-# answers the first code, later calls the second. A name not listed answers 000, as curl does on no reply.
-stub curl 'n=${!#}; n=${n#https://}; n=${n%/}
-line=$(grep "^$n " "$P2S_STUB/http.txt" 2>/dev/null)
+# curl ... --resolve <name>:<port>:<addr> <scheme>://<name>[:<port>]/: http.txt holds "<site> <code before>
+# <code after> [<address>]", <site> being the name for https on 443 and "<scheme>://<name>:<port>" otherwise; an
+# address there is the one the vhost listens on, and nothing answers at another. As in curl, a --resolve entry
+# counts only for the URL's own name and port, and these .example names resolve nowhere else (exit 6). The
+# first call per site answers the first code, later calls the second. A site not listed answers 000 (exit 7).
+stub curl 'url=${!#} res="" prev=""
+for a; do [ "$prev" = --resolve ] && res=$a; prev=$a; done
+scheme=${url%%://*} hp=${url#*://}; hp=${hp%%/*}
+name=${hp%%:*} port=${hp#"${hp%%:*}"}; port=${port#:}
+[ -n "$port" ] || { [ "$scheme" = https ] && port=443 || port=80; }
+case $res in "$name:$port:"*) addr=${res#"$name:$port:"} ;; *) printf 000; exit 6 ;; esac
+key=$name; [ "$scheme:$port" = https:443 ] || key=$scheme://$name:$port
+line=$(awk -v k="$key" "\$1 == k" "$P2S_STUB/http.txt" 2>/dev/null)
 [ -n "$line" ] || { printf 000; exit 7; }
-if [ -e "$P2S_STUB/.curl-$n" ]; then awk "{printf \"%s\", \$3}" <<<"$line"
-else : >"$P2S_STUB/.curl-$n"; awk "{printf \"%s\", \$2}" <<<"$line"; fi'
+listen=$(awk "{print \$4}" <<<"$line")
+[ -z "$listen" ] || [ "$listen" = "$addr" ] || { printf 000; exit 7; }
+mark=$P2S_STUB/.curl-${key//[\/:]/_}
+if [ -e "$mark" ]; then awk "{printf \"%s\", \$3}" <<<"$line"
+else : >"$mark"; awk "{printf \"%s\", \$2}" <<<"$line"; fi'
 stub journalctl 'u=${2%.service}
 echo "systemd[1]: $u.service: Main process exited, code=exited, status=78/CONFIG"
 echo "systemd[1]: Failed to start $u.service - The PHP FastCGI Process Manager."'
@@ -546,12 +562,16 @@ VirtualHost configuration:
                  wild alias *.shop.example.com
          port 443 namevhost blog.example.org (/etc/apache2/sites-enabled/blog.conf:1)
 *:80                   static.example.net (/etc/apache2/sites-enabled/static.conf:1)
+127.0.0.1:8080         is a NameVirtualHost
+         default server loop.example.org (/etc/apache2/sites-enabled/loop.conf:1)
+         port 8080 namevhost loop.example.org (/etc/apache2/sites-enabled/loop.conf:1)
 [2001:db8::1]:443      v6.example.com (/etc/apache2/sites-enabled/v6.conf:1)
 ServerRoot: "/etc/apache2"
 Main DocumentRoot: "/var/www/html"
 User: name="www-data" id=33'
-eq "$(p2s_apache_sites "$AS")" "$(printf '%s\n' blog.example.org shop.example.com static.example.net v6.example.com www.shop.example.com)" \
-  "apachectl -S: name-based vhosts, aliases and single vhosts, once each; wildcard aliases and settings skipped"
+eq "$(p2s_apache_sites "$AS")" "$(printf '%s\n' 'blog.example.org|443|-' 'loop.example.org|8080|127.0.0.1' 'shop.example.com|443|-' \
+  'static.example.net|80|-' 'v6.example.com|443|[2001:db8::1]' 'www.shop.example.com|443|-')" \
+  "apachectl -S: name-based vhosts, aliases and single vhosts with port and address, once each; wildcards and settings skipped"
 eq "$(p2s_inrelease_name https://ppa.launchpadcontent.net/ondrej/php/ubuntu/ noble)" \
   "ppa.launchpadcontent.net_ondrej_php_ubuntu_dists_noble_InRelease" "cached InRelease name, trailing slash ignored"
 eq "$(p2s_release_info "$(printf 'Origin: X\nLabel: A B\nDate: now\nSuite: noble\n')")" "$(printf 'Label: A B\nOrigin: X\nSuite: noble')" \
@@ -995,10 +1015,10 @@ has "$X" "kind=mitigation host=web-x branch=8.3 sapi=fpm ini=absent action=writt
   "web-x: FPM mitigated"
 has "$X" "rm /etc/php/8.3/apache2/conf.d/99-security.ini && systemctl reload apache2" "web-x: rollback line for the mod_php ini"
 has "$X" "kind=probe host=web-x name=api.example.com before=200 after=200" "web-x: nginx site probed"
-has "$X" "kind=probe host=web-x name=shop.example.com before=200 after=200" "web-x: Apache vhost probed"
-has "$X" "kind=probe host=web-x name=www.shop.example.com before=301 after=301" "web-x: Apache alias probed"
-has "$X" "kind=probe host=web-x name=blog.example.org before=200 after=200" "web-x: second Apache vhost probed"
-eq "$(grep -c 'kind=probe host=web-x name=shop.example.com ' <<<"$X")" 1 "web-x: a vhost listed as default server and as namevhost probed once"
+has "$X" "kind=probe host=web-x name=shop.example.com:8080 before=200 after=200" "web-x: Apache vhost probed over http on its own address and port"
+has "$X" "kind=probe host=web-x name=www.shop.example.com:8080 before=301 after=301" "web-x: Apache alias probed"
+has "$X" "kind=probe host=web-x name=blog.example.org:8080 before=200 after=200" "web-x: second Apache vhost probed"
+eq "$(grep -c 'kind=probe host=web-x name=shop.example.com:8080 ' <<<"$X")" 1 "web-x: a vhost listed as default server and as namevhost probed once"
 XR=$(bash "$S/report.sh" "$(ls "$P2S_CACHE"/web-x-fix-*.log)")
 has "$XR" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.12` | `8.3.6-0ubuntu0.24.04.13` | `8.3.6-0ubuntu0.24.04.13` | yes | done | same | fixed |' "report: FPM patch row"
 has "$XR" '| 8.3 | apache2 | `8.3.6-0ubuntu0.24.04.12` | `8.3.6-0ubuntu0.24.04.13` | `8.3.6-0ubuntu0.24.04.13` | yes | done | same | fixed |' "report: mod_php patch row"
