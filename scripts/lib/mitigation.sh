@@ -84,3 +84,62 @@ p2s_web_sapis() {
     | awk -F'|' '$1 ~ /^ii/ && $2 ~ /^php[0-9]+\.[0-9]+-(fpm|cgi)$/ {
         s = $2; sub(/^php/, "", s); split(s, a, "-"); print a[1], a[2] }' | sort -u
 }
+
+# Does the SAPI still load its config? FPM has a config test; CGI has none, so the binary must at least
+# start without an ini error. Prints the tail of the output on failure.
+p2s_config_ok() { # $1 branch, $2 sapi
+  local out
+  case $2 in
+    fpm) out=$(php-fpm"$1" -t </dev/null 2>&1) ;;
+    cgi) out=$(php-cgi"$1" -v </dev/null 2>&1) && ! grep -qiE 'parse error|syntax error' <<<"$out" ;;
+  esac || { echo "$out" | tail -5; return 1; }
+}
+
+# Put the mitigation in place for one SAPI and print its records. $1 host, $2 branch, $3 sapi, $4 reload
+# (yes: reload a running FPM pool whose ini changed; no: the caller restarts it).
+# Uses the caller's P2S_RC (raised to 1 on a failed test or reload, to 3 when the SAPI is not mitigated)
+# and appends to the caller's P2S_ROLLBACK array. Sets P2S_EACTION and P2S_MSTATE.
+p2s_ensure_sapi() {
+  local host=$1 branch=$2 sapi=$3 reload=$4 dir ini owner had=no prev=""
+  dir=$(p2s_path "/etc/php/$branch/$sapi/conf.d")
+  ini=$dir/99-security.ini
+  owner=$(p2s_ini_owner "$ini")
+  P2S_EACTION=unchanged
+  if [ ! -d "$dir" ]; then
+    P2S_EACTION=no-conf-dir
+  elif [ "$owner" = foreign ]; then
+    P2S_EACTION=left-foreign
+  elif [ "$owner" = legacy ] && p2s_ini_disables "$ini"; then
+    P2S_EACTION=adopted
+  elif [ "$(cat "$ini" 2>/dev/null)" != "$(p2s_ini_content)" ]; then
+    [ -e "$ini" ] && { had=yes; prev=$(cat "$ini"); }
+    p2s_ini_content >"$ini"
+    if p2s_config_ok "$branch" "$sapi"; then
+      P2S_EACTION=written
+      if [ "$sapi" = fpm ]; then
+        if [ "$reload" != yes ]; then
+          :
+        elif [ "$(systemctl is-active "php$branch-fpm" </dev/null 2>/dev/null)" != active ]; then
+          P2S_EACTION=written-not-running
+        elif ! systemctl reload "php$branch-fpm" </dev/null; then
+          P2S_EACTION=reload-failed
+          P2S_RC=1
+        fi
+        P2S_ROLLBACK+=("rm ${ini#"${P2S_ROOT:-}"} && systemctl reload php$branch-fpm")
+      else
+        P2S_ROLLBACK+=("rm ${ini#"${P2S_ROOT:-}"}")
+      fi
+      [ "$had" = yes ] && P2S_ROLLBACK[-1]="restore the previous ${ini#"${P2S_ROOT:-}"} (content above), then reload"
+    else
+      # Roll back before anything reloads: the running pool keeps its old config.
+      if [ "$had" = yes ]; then printf '%s\n' "$prev" >"$ini"; else rm -f "$ini"; fi
+      P2S_EACTION=test-failed
+      P2S_RC=1
+    fi
+    [ "$had" = yes ] && { echo "previous $ini:"; printf '%s\n' "$prev" | sed 's/^/  | /'; }
+  fi
+  p2s_mitigation_report "$host" "$branch" "$sapi" "$owner" "$P2S_EACTION"
+  echo "php$branch $sapi: 99-security.ini $owner, $P2S_EACTION -> $P2S_MSTATE"
+  if [ "$P2S_MSTATE" != mitigated ] && [ "$P2S_RC" = 0 ]; then P2S_RC=3; fi
+}
+

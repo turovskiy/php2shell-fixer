@@ -2,7 +2,7 @@
 
 Claude Code plugin that audits and patches PHP2Shell (CVE-2026-109618, CVE-2026-109619) on Debian and Ubuntu servers running PHP-FPM or mod_php, and keeps the CVE-2026-115560 mitigation in place.
 
-Work in progress. Right now the plugin can audit a PHP-FPM host and tell you, per PHP branch, whether the installed build is fixed and why. Patching, the mitigation and auto-updates are coming next. The plan lives in [issue #1](https://github.com/turovskiy/php2shell-fixer/issues/1) and its sub-issues.
+Work in progress. The plugin audits PHP-FPM hosts, patches them, and keeps the CVE-2026-115560 mitigation in place. mod_php support and keeping PPA PHP updated on its own are coming next. The plan lives in [issue #1](https://github.com/turovskiy/php2shell-fixer/issues/1) and its sub-issues.
 
 ## Install
 
@@ -51,6 +51,18 @@ bash scripts/next.sh --latest     # what to do next on each server: audit, fix, 
 ```
 
 Write commands (`ensure`) are never cut off by a time limit, even if a server is slow: a session killed in the middle of apt or a reload leaves the server half changed. Only the read-only audit has a limit (10 minutes per server by default). A dropped connection is another matter: if your laptop sleeps or the network goes, the server most likely stops the command where it was. For `ensure` that is harmless (run it again), but keep the connection up until it finishes.
+
+## Patch a server
+
+```
+bash scripts/run.sh fix <host>
+```
+
+This is the write that closes PHP2Shell. For every running PHP-FPM branch it installs the build the audit names as the target, with every package of that PHP version pinned to the same version; PECL extensions such as `php8.3-redis` keep their own versions. It also puts the upload_progress mitigation in place, runs the config test, restarts only the pools it changed, and compares each PHP site's HTTP status code before and after. On PHP 8.5 without a fixed build it also turns off `fatal_error_backtraces`.
+
+It stops before touching anything when a PHP package is held, when `apt-get update` fails, or when the ondrej PPA changed its Release info; in that last case it prints the `apt-get update --allow-releaseinfo-change-...` command for you to run once you have checked the change. It never accepts it on its own.
+
+The patch runs on the server as its own systemd unit, not inside your ssh session. If your connection drops halfway, apt finishes anyway. Run the same command again: it attaches to the patch that is still running, or shows you the result of the one that finished, and never starts a second patch on top. Every run backs up `/etc/php` to `/root/etc-php-<time>.tgz` and ends with the commands that undo it.
 
 ## Keep the mitigation in place
 

@@ -40,6 +40,7 @@ for target in $(cut -f1 <<<"$newest" | sort -u); do
         *)
           step=$w_mode
           reason="last $w_mode: $(word status "$w")"
+          [ "$(word unfixed "$w")" = - ] || reason+=", unfixed: php$(word unfixed "$w" | sed 's/,/, php/g')"
           [ "$(word unmitigated "$w")" = - ] || reason+=", not mitigated: $(word unmitigated "$w")"
           [ "$(word overrides "$w")" = - ] || reason+=", pool override: $(word overrides "$w") (the operator removes it)"
           ;;

@@ -1,0 +1,253 @@
+# PHP2Shell patch for PHP-FPM hosts. Two parts in one program:
+# - the launcher (the tail of this file) runs in the ssh session: it starts the worker as a transient systemd
+#   unit, or attaches to a run still going, or hands back a finished run's log, and follows that log;
+# - the worker (p2s_fix_worker) is the patch itself, detached from ssh, so a dropped connection never
+#   stops apt halfway.
+# Runs as the tail of the bundle from run.sh (after versions.sh, p2s.sh, mitigation.sh, hostfacts.sh,
+# branch.sh): run.sh fix <host>
+# Server state: /var/lib/php2shell/fix-<stamp>.{log,exit,worker.sh,reported} and "current" (the last run).
+# Exit (the worker's, passed on): 0 every running branch fixed and HTTP unchanged; 3 a branch still unfixed
+#   (mitigation applied) or an HTTP status changed; 1 preflight failed, apt failed, a config test failed or a
+#   pool is down after its restart.
+set -u
+export LC_ALL=C
+
+P2S_STATE=$(p2s_path /var/lib/php2shell)
+
+# HTTP status of every PHP site nginx serves, one "name code" per line, asked locally over 443.
+p2s_probe() {
+  local ngx n
+  ngx=$(nginx -T </dev/null 2>/dev/null) || return 0
+  p2s_nginx_sites "$ngx" | cut -d'|' -f1 | tr ',' '\n' | grep -E '^[A-Za-z0-9.-]+\.[A-Za-z]+$' | sort -u | head -25 \
+    | while read -r n; do
+      printf '%s %s\n' "$n" "$(curl -sk -o /dev/null -m 15 -w '%{http_code}' --resolve "$n:443:127.0.0.1" "https://$n/" </dev/null)"
+    done
+}
+
+# The patch. $1 run stamp. Returns 0, 1 or 3 as described at the top.
+p2s_fix_worker() {
+  local stamp=$1 host held upd urc fields backup before_probe after_probe pkgs
+  export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l LC_ALL=C
+  host=$(hostname </dev/null)
+  echo "== php2shell fix: $host ($(p2s_os)), run $stamp"
+  p2s_record kind=host host="$host" os="$(p2s_os)"
+  P2S_RC=0 P2S_ROLLBACK=()
+  P2S_TMP=$(mktemp -d)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$P2S_TMP'" RETURN
+
+  echo "== preflight"
+  held=$(apt-mark showhold </dev/null 2>/dev/null | grep -E '^(php|libapache2-mod-php)' | paste -sd, -)
+  if [ -n "$held" ]; then
+    echo "STOP: held PHP packages: $held. apt will not upgrade them; release them with apt-mark unhold first."
+    p2s_record kind=preflight host="$host" result=failed reason=held packages="$held"
+    return 1
+  fi
+  upd=$(apt-get -o DPkg::Lock::Timeout=600 -o Acquire::Retries=3 update </dev/null 2>&1)
+  urc=$?
+  if grep -qE "changed its '(Origin|Label|Suite|Codename|Version)' value" <<<"$upd"; then
+    fields=$(grep -oE "changed its '[A-Za-z]+' value" <<<"$upd" | sed -E "s/.*'([A-Za-z]+)'.*/\\1/" | sort -u)
+    grep -E "changed its" <<<"$upd"
+    echo "STOP: a source changed its Release info; apt-get update refuses it until you accept the change."
+    echo "Check the change is expected, then accept it with:"
+    echo "  apt-get update $(for f in $fields; do printf -- '--allow-releaseinfo-change-%s ' "${f,,}"; done)"
+    p2s_record kind=preflight host="$host" result=failed reason=release-info-changed fields="$(paste -sd, - <<<"$fields")"
+    return 1
+  fi
+  if [ "$urc" != 0 ]; then
+    tail -5 <<<"$upd"
+    echo "STOP: apt-get update failed (exit $urc)"
+    p2s_record kind=preflight host="$host" result=failed reason=apt-update-failed
+    return 1
+  fi
+  backup=/root/etc-php-$stamp.tgz
+  if ! tar czf "$(p2s_path "$backup")" -C "$(p2s_path /)" etc/php </dev/null 2>/dev/null; then
+    echo "STOP: backup of /etc/php failed"
+    p2s_record kind=preflight host="$host" result=failed reason=backup-failed
+    return 1
+  fi
+  before_probe=$(p2s_probe)
+  echo "backup $backup"
+  p2s_record kind=preflight host="$host" result=ok backup="$backup" sites="$(grep -c . <<<"$before_probe")"
+
+  local pkg before branch active after nver vafter rafter cve state restart mods ini85 mbefore changed
+  while IFS='|' read -r pkg before; do
+    [ -n "$pkg" ] || continue
+    branch=${pkg#php}
+    branch=${branch%-fpm}
+    echo "== php$branch"
+    active=$(systemctl is-active "php$branch-fpm" </dev/null 2>/dev/null)
+    if [ "$active" != active ]; then
+      echo "php$branch-fpm is not running: left alone"
+      p2s_record kind=fix host="$host" branch="$branch" before="$before" after="$before" target=- fixed=- \
+        restart=skipped modules=- state=not-running
+      continue
+    fi
+    # The same judgement as the audit, on the lists apt-get update just refreshed.
+    p2s_branch_eval "$host" "$branch" "$before"
+    [ ${#BR_CHUMAN[@]} -eq 0 ] || printf '%s\n' "${BR_CHUMAN[@]}"
+    [ ${#BR_CRECORDS[@]} -eq 0 ] || printf '%s\n' "${BR_CRECORDS[@]}"
+    # Every package built from the branch's source package (php8.3), by the source field and not by name:
+    # PECL extensions such as php8.3-redis or php8.3-imagick come from their own sources with their own
+    # versions, and pinning them to the PHP version would make apt refuse the whole install.
+    pkgs=$(dpkg-query -W -f='${db:Status-Abbrev}|${binary:Package}|${source:Package}\n' "php$branch-*" "libapache2-mod-php$branch" </dev/null 2>/dev/null \
+      | awk -F'|' -v s="php$branch" '$1 ~ /^ii/ && $3 == s {print $2}' | sort -u | paste -sd' ' -)
+    mbefore=$(php-fpm"$branch" -m </dev/null 2>/dev/null)
+    state="" restart=skipped changed=no
+    # A pool already on the build it should run needs no restart; one started before its last install does.
+    [ "$(p2s_restart_state "$branch" active | awk '{print $3}')" = needed ] && changed=yes
+    if [ "$BR_TARGET" = none ]; then
+      echo "php$branch: $before is $BR_VERDICT; no install ($BR_TREASON)"
+    else
+      echo "php$branch: $before -> $BR_TARGET for: $pkgs"
+      # shellcheck disable=SC2046
+      if apt-get -o DPkg::Lock::Timeout=600 -o Acquire::Retries=5 -o Dpkg::Options::=--force-confold \
+        install -y -q --allow-downgrades $(for p in $pkgs; do printf '%s=%s ' "$p" "$BR_TARGET"; done) </dev/null; then
+        changed=yes
+        P2S_ROLLBACK+=("apt-get install --allow-downgrades $(for p in $pkgs; do printf '%s=%s ' "$p" "$before"; done)")
+      else
+        echo "apt-get install failed"
+        state=apt-failed
+        P2S_RC=1
+      fi
+    fi
+    after=$(dpkg-query -W -f='${Version}' "php$branch-fpm" </dev/null 2>/dev/null)
+    # shellcheck disable=SC2086
+    nver=$(dpkg-query -W -f='${Version}\n' $pkgs </dev/null 2>/dev/null | sort -u | grep -c .)
+    [ "$nver" -le 1 ] || echo "WARNING: php$branch packages are on $nver different versions"
+    cve=$(p2s_installed_cve "$branch")
+    read -r vafter rafter <<<"$(p2s_verdict "$branch" "$after" "$(p2s_origin "$after")" "$cve")"
+    echo "php$branch-fpm now $after: $vafter ($rafter)"
+
+    if [ -z "$state" ]; then
+      # The pool is restarted below, so ensure only writes and tests; it does not reload.
+      p2s_ensure_sapi "$host" "$branch" fpm no
+      [ "$P2S_EACTION" = test-failed ] && state=test-failed
+      [ "$P2S_EACTION" = written ] && changed=yes
+    fi
+    ini85=""
+    if [ -z "$state" ] && [ "$branch" = 8.5 ] && [ "$vafter" = unfixed ]; then
+      # The fatal error backtrace path of CVE-2026-109619 exists only in 8.5; closed until a fixed build lands.
+      ini85=$(p2s_path /etc/php/8.5/fpm/conf.d/99-php2shell-backtraces.ini)
+      printf '%s: CVE-2026-109619 backtrace path, until PHP 8.5 is fixed.\nfatal_error_backtraces = 0\n' "$P2S_INI_MARKER" >"$ini85"
+      P2S_ROLLBACK+=("rm ${ini85#"${P2S_ROOT:-}"} && systemctl restart php8.5-fpm")
+      changed=yes
+      echo "php8.5: fatal_error_backtraces = 0 written"
+    fi
+    if [ -z "$state" ] && [ "$changed" = no ]; then
+      restart=not-needed
+    elif [ -z "$state" ] && ! p2s_config_ok "$branch" fpm; then
+      [ -z "$ini85" ] || rm -f "$ini85"
+      echo "php$branch: config test failed; pool not restarted"
+      state=test-failed
+      P2S_RC=1
+    fi
+    if [ -z "$state" ] && [ "$changed" = yes ]; then
+      systemctl restart "php$branch-fpm" </dev/null
+      if [ "$(systemctl is-active "php$branch-fpm" </dev/null 2>/dev/null)" = active ]; then
+        restart=done
+      else
+        restart=failed state=pool-down
+        echo "php$branch-fpm is DOWN after its restart:"
+        journalctl -u "php$branch-fpm" -n 20 --no-pager </dev/null 2>&1
+        P2S_RC=1
+      fi
+    fi
+    if [ "$(php-fpm"$branch" -m </dev/null 2>/dev/null)" = "$mbefore" ]; then mods=same; else mods=changed; fi
+    [ -n "$state" ] || state=$([ "$vafter" = fixed ] && echo fixed || echo unfixed-mitigated)
+    if [ "$state" = unfixed-mitigated ] && [ "$P2S_RC" = 0 ]; then P2S_RC=3; fi
+    p2s_record kind=fix host="$host" branch="$branch" before="$before" after="$after" target="$BR_TARGET" \
+      fixed="$([ "$vafter" = fixed ] && echo yes || echo no)" restart="$restart" modules="$mods" state="$state"
+  done <<<"$(dpkg-query -W -f='${db:Status-Abbrev}|${binary:Package}|${Version}\n' 'php*-fpm' </dev/null 2>/dev/null \
+    | awk -F'|' '$1 ~ /^ii/ && $2 ~ /^php[0-9]+\.[0-9]+-fpm$/ {print $2 "|" $3}')"
+
+  echo "== http after"
+  after_probe=$(p2s_probe)
+  local name code acode pstate=unchanged
+  if [ -z "$before_probe" ]; then
+    pstate=no-sites
+    echo "no sites found: nothing to compare"
+  else
+    while read -r name code; do
+      acode=$(awk -v n="$name" '$1 == n {print $2}' <<<"$after_probe")
+      p2s_record kind=probe host="$host" name="$name" before="$code" after="${acode:--}"
+      [ "$code" = "$acode" ] || { pstate=changed; echo "$name: $code -> ${acode:--}"; }
+    done <<<"$before_probe"
+    [ "$pstate" = changed ] || echo "all $(grep -c . <<<"$before_probe") status codes unchanged"
+  fi
+  p2s_record kind=probe_summary host="$host" state="$pstate"
+  if [ "$pstate" = changed ] && [ "$P2S_RC" = 0 ]; then P2S_RC=3; fi
+
+  echo "== summary $host"
+  echo "rollback:"
+  echo "  tar xzf $backup -C /   # /etc/php as it was before this run, then restart the pools"
+  [ ${#P2S_ROLLBACK[@]} -eq 0 ] || printf '  %s\n' "${P2S_ROLLBACK[@]}"
+  echo "exit $P2S_RC"
+  return "$P2S_RC"
+}
+
+# Print a run's log as it grows until its exit file appears, then mark it reported and exit with its code.
+p2s_follow() { # $1 stamp
+  local log=$P2S_STATE/fix-$1.log ex=$P2S_STATE/fix-$1.exit off=0 size code
+  while :; do
+    if [ -f "$log" ]; then
+      size=$(stat -c %s "$log")
+      if [ "$size" -gt "$off" ]; then tail -c +$((off + 1)) "$log" | head -c $((size - off)); off=$size; fi
+    fi
+    [ -e "$ex" ] && break
+    if [ "$(systemctl is-active "php2shell-fix-$1" </dev/null 2>/dev/null)" != active ] && [ ! -e "$ex" ]; then
+      sleep 2
+      [ -e "$ex" ] && continue
+      echo "STOP: unit php2shell-fix-$1 ended without an exit code; the log above is all there is"
+      touch "$P2S_STATE/fix-$1.reported"
+      exit 1
+    fi
+    sleep 1
+  done
+  code=$(cat "$ex")
+  touch "$P2S_STATE/fix-$1.reported"
+  echo "== patch run $1 finished: exit $code"
+  exit "$code"
+}
+
+host=$(hostname </dev/null)
+if [ "$(id -u </dev/null)" != 0 ]; then
+  p2s_record kind=host host="$host" os="$(p2s_os)"
+  echo "STOP: fix must run as root"
+  exit 1
+fi
+mkdir -p "$P2S_STATE"
+# One launcher at a time: two operators starting a patch together must not start two.
+exec 9>"$P2S_STATE/lock"
+flock -n 9 || { echo "STOP: another php2shell fix launcher is running on $host"; exit 1; }
+
+cur=$(cat "$P2S_STATE/current" 2>/dev/null)
+if [ -n "$cur" ] && [ ! -e "$P2S_STATE/fix-$cur.reported" ]; then
+  if [ -e "$P2S_STATE/fix-$cur.exit" ]; then
+    echo "== run $cur finished while nobody was watching; its log follows. No new patch was started."
+  else
+    echo "== attaching to run $cur, still going. No new patch was started."
+  fi
+  p2s_follow "$cur"
+fi
+
+# Milliseconds: a run started right after the last one was reported must not reuse its files.
+stamp=$(date -u +%Y%m%dT%H%M%S%3NZ)
+worker=$P2S_STATE/fix-$stamp.worker.sh
+{
+  echo '#!/bin/bash'
+  printf 'P2S_ROOT=%q\n' "${P2S_ROOT:-}"
+  declare -p P2S_UPSTREAM_FIXED P2S_UBUNTU_FIXED P2S_FIXES_RELEASED P2S_SCHEMA P2S_INI_MARKER P2S_INI_LEGACY P2S_STATE
+  declare -f
+  printf 'p2s_fix_worker %q >>%q 2>&1\n' "$stamp" "$P2S_STATE/fix-$stamp.log"
+  printf 'echo $? >%q.tmp && mv %q.tmp %q\n' "$P2S_STATE/fix-$stamp.exit" "$P2S_STATE/fix-$stamp.exit" "$P2S_STATE/fix-$stamp.exit"
+} >"$worker"
+echo "$stamp" >"$P2S_STATE/current"
+# 9>&-: the unit must not hold the launcher lock, or the next launcher could not attach.
+if ! systemd-run --unit="php2shell-fix-$stamp" --collect --quiet /bin/bash "$worker" </dev/null 9>&-; then
+  echo "STOP: systemd-run could not start the patch unit"
+  rm -f "$P2S_STATE/current"
+  exit 1
+fi
+echo "== patch started as unit php2shell-fix-$stamp; it goes on if this connection drops"
+p2s_follow "$stamp"

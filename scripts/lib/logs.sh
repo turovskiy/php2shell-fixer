@@ -53,6 +53,7 @@ p2s_log_summary() { # $1 log
         if (r["verdict"] != "fixed") unf = add(unf, r["branch"])
         if (r["restart"] == "needed") rn = add(rn, r["branch"])
       }
+      else if (r["kind"] == "fix" && r["fixed"] == "no") unf = add(unf, r["branch"])
       else if (r["kind"] == "mitigation" && r["state"] != "mitigated") um = add(um, r["branch"] "/" r["sapi"] ":" r["state"])
       else if (r["kind"] == "override" && r["enables"] == "yes") ov = add(ov, r["file"] ":" r["line"])
     }

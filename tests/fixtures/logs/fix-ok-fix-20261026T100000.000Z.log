@@ -1,0 +1,4 @@
+@p2s schema=1 kind=run target=fix-ok mode=fix started=20261026T100000.000Z
+@p2s schema=1 kind=host host=fix-ok os=ubuntu-24.04
+@p2s schema=1 kind=fix host=fix-ok branch=8.3 before=a after=b target=b fixed=yes restart=done modules=same state=fixed
+@p2s schema=1 kind=run_end target=fix-ok mode=fix exit=0 status=ok
