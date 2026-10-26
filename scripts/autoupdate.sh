@@ -15,7 +15,7 @@
 #    did not upgrade before the entry (that one would come from the PPA); otherwise the entry is taken out.
 # A pin or origin entry already in place is recognised by content, whatever its file name, and not written
 # twice. A pin apt does not apply (a preferences.d name with another extension than .pref) shows in step 2.
-# Runs as the tail of the bundle from run.sh (after versions.sh, p2s.sh, hostfacts.sh, branch.sh, pins.sh):
+# Runs as the tail of the bundle from run.sh (after versions.sh, p2s.sh, hostfacts.sh, pins.sh):
 # run.sh autoupdate <host>
 # Exit: 0 configured, already in place, or no PPA on the host; 1 not root, a PPA source without a cached
 #       Release file or with changed Release info, a candidate that would change origin (refused), or a dry
