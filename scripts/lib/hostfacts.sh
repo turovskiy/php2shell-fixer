@@ -139,6 +139,34 @@ p2s_release_info() { # $1 InRelease text
   grep -E '^(Origin|Label|Suite|Codename):' <<<"$1" | sort
 }
 
+# Has a source's Release info changed since apt cached it? apt-get update refuses such a source until someone
+# accepts the change. The fresh InRelease goes into a temp file that is removed again; nothing else is
+# written. Prints "<same|changed|unknown> <changed fields, comma-joined, or ->", then for a change the
+# differing lines ("  cached: Label: ...", "  remote: Label: ..."). unknown: no cached InRelease, no
+# apt-helper, or the fetch failed.
+p2s_release_check() { # $1 uri, $2 suite
+  local cached helper dest old new info=unknown changed=- diffs=""
+  cached=$(p2s_path /var/lib/apt/lists)/$(p2s_inrelease_name "$1" "$2")
+  helper=$(p2s_path /usr/lib/apt/apt-helper)
+  if [ -f "$cached" ] && [ -x "$helper" ] && dest=$(mktemp); then
+    if timeout 30 "$helper" -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 \
+      download-file "${1%/}/dists/$2/InRelease" "$dest" </dev/null >/dev/null 2>&1; then
+      old=$(p2s_release_info "$(cat "$cached")")
+      new=$(p2s_release_info "$(cat "$dest")")
+      if [ "$old" = "$new" ]; then
+        info=same
+      else
+        info=changed
+        changed=$(diff <(echo "$old") <(echo "$new") | sed -nE 's/^[<>] ([A-Za-z]+):.*/\1/p' | sort -u | paste -sd, -)
+        diffs=$(diff <(echo "$old") <(echo "$new") | sed -nE 's/^< /  cached: /p; s/^> /  remote: /p')
+      fi
+    fi
+    rm -f "$dest"
+  fi
+  echo "$info $changed"
+  [ -z "$diffs" ] || printf '%s\n' "$diffs"
+}
+
 # Encode a value for a record: records split on spaces.
 p2s_enc() {
   local v=${1//%/%25}

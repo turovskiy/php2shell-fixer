@@ -68,15 +68,17 @@ dpkglists web-j '2026-10-24 07:00:00 UTC' php8.4-opcache
 dpkglists web-l '2026-10-22 06:00:00 UTC' libapache2-mod-php8.3 php8.3-common
 # apt-helper is called by absolute path, so it goes into the fake root of every host with remote/ fixtures:
 # "download-file URL DEST" copies remote/<URL with / and : as _> to DEST.
-for h in "$WORK"/hosts/*/; do
-  [ -d "$h/remote" ] || continue
-  mkdir -p "$h/root/usr/lib/apt"
+apthelper() { # apthelper <host dir>
+  mkdir -p "$1/root/usr/lib/apt"
   printf '%s\n' '#!/usr/bin/env bash' 'echo "apt-helper $*" >>"$STUB_LOG"' \
     'for a; do case $a in http*) url=$a ;; esac; done; dest=${!#}' \
     'src=$P2S_STUB/remote/$(printf %s "$url" | tr "/:" "__")' \
     '[ -f "$src" ] || { echo "E: Failed to fetch $url  404  Not Found" >&2; exit 100; }' \
-    'cp "$src" "$dest"' >"$h/root/usr/lib/apt/apt-helper"
-  chmod +x "$h/root/usr/lib/apt/apt-helper"
+    'cp "$src" "$dest"' >"$1/root/usr/lib/apt/apt-helper"
+  chmod +x "$1/root/usr/lib/apt/apt-helper"
+}
+for h in "$WORK"/hosts/*/; do
+  [ -d "$h/remote" ] && apthelper "$h"
 done
 
 for d in "$WORK"/hosts/*/debs/*/; do
@@ -1228,6 +1230,24 @@ has "$AD" "kind=uu_entry host=web-y value=LP-PPA-ondrej-php:noble file=$UUC acti
 has "$AD" "kind=keeper host=web-y state=dryrun-failed" "web-y dry run fails: keeper record"
 hasnt "$AD" "rm $UUC" "web-y dry run fails: no rollback line for the removed entry"
 has "$AD" "rm $PIN83" "web-y dry run fails: rollback line for the pin"
+
+# The PPA changed its Release Label since apt cached it: apt-get update refuses the source until someone accepts
+# the change, so the keeper stops before writing anything and prints the accept command, as the patcher does.
+yreset
+mkdir -p "$WORK/hosts/web-y/remote"
+sed 's/^Label: .*/Label: PPA for PHP (new)/' "$(y /var/lib/apt/lists/ppa.launchpadcontent.net_ondrej_php_ubuntu_dists_noble_InRelease)" \
+  >"$WORK/hosts/web-y/remote/https___ppa.launchpadcontent.net_ondrej_php_ubuntu_dists_noble_InRelease"
+apthelper "$WORK/hosts/web-y"
+TL=$(tree web-y)
+: >"$STUB_LOG"
+AL=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 1 "web-y with a changed Release Label: exit 1"
+has "$AL" "apt-get update --allow-releaseinfo-change-label" "web-y with a changed Release Label: accept command printed"
+has "$AL" "remote: Label: PPA for PHP (new)" "web-y with a changed Release Label: the change shown"
+has "$AL" "kind=keeper host=web-y state=stopped reason=release-info-changed fields=Label" "web-y with a changed Release Label: keeper record"
+eq "$(tree web-y)" "$TL" "web-y with a changed Release Label: nothing written"
+eq "$(grep -cE '^apt-get ' "$STUB_LOG")" 0 "web-y with a changed Release Label: the keeper never runs the accept command itself"
+eq "$(find "$TMPDIR" -mindepth 1 | head -3)" "" "web-y with a changed Release Label: no InRelease download left behind"
 
 # No cached Release file: the Origin to accept is unknown, so nothing is written.
 yreset

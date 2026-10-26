@@ -1,6 +1,8 @@
 # Auto-update keeper: PHP from the ondrej/sury PPA keeps getting security updates from unattended-upgrades, and
 # a distro-built branch never moves to the PPA. Only on a host with the PPA configured; anywhere else it writes
 # nothing. The order is the safety:
+# 0. each PPA source's Release info (Origin, Label, Suite, Codename) must be what apt cached; a changed one
+#    stops the run before anything is written and prints the apt-get update command that accepts it;
 # 1. every distro-built branch the PPA also ships is pinned off the PPA (Pin-Priority -1,
 #    /etc/apt/preferences.d/php2shell-php<X.Y>.pref);
 # 2. each installed PHP package's apt-cache policy candidate must keep the origin of its installed build, an
@@ -14,8 +16,8 @@
 # Runs as the tail of the bundle from run.sh (after versions.sh, p2s.sh, hostfacts.sh, branch.sh, pins.sh):
 # run.sh autoupdate <host>
 # Exit: 0 configured, already in place, or no PPA on the host; 1 not root, a PPA source without a cached
-#       Release file, a candidate that would change origin (refused), or a dry run that does not accept the
-#       PPA origin (its entry removed again).
+#       Release file or with changed Release info, a candidate that would change origin (refused), or a dry
+#       run that does not accept the PPA origin (its entry removed again).
 set -u
 export LC_ALL=C
 
@@ -59,6 +61,26 @@ done <<<"$releases"
 if [ -n "$missing" ]; then
   echo "STOP: apt has no cached Release file for:$missing. Run apt-get update on the host, then this again."
   au_end 1 state=stopped reason=no-cached-release
+fi
+
+# A source whose Release info changed since apt cached it gets no updates until someone accepts the change, and
+# its Origin or Label may be what the pins and the origin entry would name: stop before writing anything.
+fields=""
+while IFS='|' read -r uri suite _; do
+  rc=$(p2s_release_check "$uri" "$suite")
+  read -r info changed <<<"$(head -1 <<<"$rc")"
+  [ "$info" = changed ] || continue
+  echo "PPA $uri $suite: Release info changed ($changed)"
+  tail -n +2 <<<"$rc"
+  fields+=",$changed"
+done <<<"$releases"
+if [ -n "$fields" ]; then
+  fields=$(tr ',' '\n' <<<"${fields#,}" | sort -u)
+  echo "STOP: a PPA source changed its Release info; apt-get update refuses it until you accept the change."
+  echo "Check the change is expected, then accept it with:"
+  echo "  apt-get update $(for f in $fields; do printf -- '--allow-releaseinfo-change-%s ' "${f,,}"; done)"
+  echo "and run this again."
+  au_end 1 state=stopped reason=release-info-changed fields="$(paste -sd, - <<<"$fields")"
 fi
 
 # Every PHP branch, the package that stands for it (its FPM, its mod_php, its common package), the origin of
