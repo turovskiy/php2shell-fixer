@@ -87,9 +87,12 @@ p2s_lists_date() { # $1 origin
 # BR_CRECORDS (one "candidate" record per build apt offers). A candidate's changelog is fetched once per run,
 # however many SAPIs of the branch ask (P2S_CVE_SEEN).
 p2s_branch_eval() {
-  local host=$1 branch=$2 ver=$3 pkg=${4:-php$2-fpm} sapi=${5:-fpm} offered cv co ccve cverdict creason cands=()
+  local host=$1 branch=$2 ver=$3 pkg=${4:-php$2-fpm} sapi=${5:-fpm} policy offered cv co ccve cverdict creason cands=()
   declare -gA P2S_CVE_SEEN
-  BR_ORIGIN=$(p2s_origin "$ver")
+  # Origins come from the sources apt-cache policy lists under each build: Debian's plain 8.4.11-1 is told
+  # from a third-party build only by its deb.debian.org source.
+  policy=$(apt-cache policy "$pkg" </dev/null 2>/dev/null)
+  BR_ORIGIN=$(p2s_build_origin "$policy" "$ver")
   BR_CVE=$(p2s_installed_cve "$branch")
   read -r BR_VERDICT BR_REASON <<<"$(p2s_verdict "$branch" "$ver" "$BR_ORIGIN" "$BR_CVE")"
   BR_CHUMAN=() BR_CRECORDS=()
@@ -98,7 +101,7 @@ p2s_branch_eval() {
   offered=$(apt-cache madison "$pkg" </dev/null 2>/dev/null | awk -F'|' '{gsub(/ /, "", $2)} $2 != "" && !seen[$2]++ {print $2}')
   while IFS= read -r cv; do
     [ -n "$cv" ] || continue
-    co=$(p2s_origin "$cv")
+    co=$(p2s_build_origin "$policy" "$cv")
     if [ "$BR_VERDICT" = unfixed ] && [ "$co" = "$BR_ORIGIN" ] && dpkg --compare-versions "$cv" gt "$ver"; then
       ccve=${P2S_CVE_SEEN[$branch=$cv]:-}
       [ -n "$ccve" ] || { ccve=$(p2s_candidate_cve "php$branch-common" "$cv"); P2S_CVE_SEEN[$branch=$cv]=$ccve; }

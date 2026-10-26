@@ -29,7 +29,7 @@ p2s_record() {
 
 # Where a build comes from, by its version string: the ondrej/sury PPA (sury's Debian builds carry +debian<N>),
 # the distro (Ubuntu or Debian), or something else. A Debian revision without ~debNN or +debNN (trixie's
-# 8.4.11-1) says nothing and stays other; apt-cache policy names the source when it matters (p2s_url_origin).
+# 8.4.11-1) says nothing and stays other: p2s_build_origin asks apt-cache policy first and falls back to this.
 p2s_origin() {
   case $1 in
     *sury* | *+debian[0-9]*) echo ppa ;;
@@ -57,6 +57,33 @@ p2s_url_origin() { # $1 uri, $2 suite/component
   p2s_list_origin "${u//\//_}_dists_${2%%/*}_"
 }
 
+# The sources apt-cache policy lists under each build, one "version|priority|uri|suite" per source line. A
+# version line (" *** <version> <priority>" for the installed one) gives version and priority, each source line
+# under it ("        500 http://deb.debian.org/debian trixie/main amd64 Packages") uri and suite;
+# /var/lib/dpkg/status is no source. $1 the output of apt-cache policy for one package.
+p2s_policy_sources() {
+  awk '/^ \*\*\* [^ ]+ -?[0-9]+$|^     [^ ]+ -?[0-9]+$/ { v = $(NF - 1); pr = $NF; next }
+    v != "" && /^ +-?[0-9]+ [a-z+]+:\/\// { print v "|" pr "|" $2 "|" $3 }' <<<"$1"
+}
+
+# Where a build comes from: the origin of the first source apt-cache policy lists under it that says ppa or
+# distro (p2s_url_origin), else its version string (p2s_origin), as for a build only in /var/lib/dpkg/status.
+# Shared by the audit, the patcher and the keeper. $1 apt-cache policy output of the package, $2 version.
+p2s_build_origin() {
+  local v uri dist o
+  while IFS='|' read -r v _ uri dist; do
+    [ "$v" = "$2" ] || continue
+    o=$(p2s_url_origin "$uri" "$dist")
+    [ "$o" = other ] || { echo "$o"; return; }
+  done < <(p2s_policy_sources "$1")
+  p2s_origin "$2"
+}
+
+# The same for a package's build as apt-cache policy shows it now. $1 package, $2 version.
+p2s_package_origin() {
+  p2s_build_origin "$(apt-cache policy "$1" </dev/null 2>/dev/null)" "$2"
+}
+
 # Are apt lists dated $1 (UTC ISO time, or "unknown") too old to offer the fixed builds? Prints yes|no|unknown.
 p2s_lists_stale() {
   case $1 in
@@ -78,7 +105,7 @@ p2s_changelog_has_cves() {
 }
 
 # Verdict for an installed build. Prints "<fixed|unfixed> <reason>".
-# $1 branch (8.3), $2 installed version, $3 origin (p2s_origin), $4 changelog names both CVEs (yes|no|missing)
+# $1 branch (8.3), $2 installed version, $3 origin (p2s_build_origin), $4 changelog names both CVEs (yes|no|missing)
 p2s_verdict() {
   local branch=$1 ver=$2 origin=$3 cve=$4
   local upstream=${P2S_UPSTREAM_FIXED[$branch]:-} ubuntu=""
