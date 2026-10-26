@@ -1,5 +1,6 @@
 # CVE-2026-115560 mitigation: session.upload_progress off in every web SAPI. Shared by audit.sh (inspects)
-# and ensure.sh (writes). Sourced after p2s.sh. Covers FPM and CGI; CLI serves no web requests.
+# and ensure.sh (writes). Sourced after p2s.sh. Covers FPM, mod_php (SAPI apache2) and CGI; CLI serves no web
+# requests.
 
 P2S_INI_MARKER='; Managed by php2shell-fixer'
 # fix.sh wrote this comment on hosts patched before the plugin existed; such a file is ours too.
@@ -26,12 +27,43 @@ p2s_ini_disables() {
   grep -qiE '^[[:space:]]*session\.upload_progress\.enabled[[:space:]]*=[[:space:]]*"?(0|off|false|no)"?[[:space:]]*$' "$1" 2>/dev/null
 }
 
+# The systemd unit that serves a SAPI: php<X.Y>-fpm for FPM, apache2 for mod_php, none for CGI.
+p2s_sapi_unit() { # $1 branch, $2 sapi
+  case $2 in fpm) echo "php$1-fpm" ;; apache2) echo apache2 ;; esac
+}
+
+# Does Apache load the branch's mod_php? Debian enables it as mods-enabled/php<X.Y>.load.
+p2s_modphp_loaded() { # $1 branch
+  [ -e "$(p2s_path "/etc/apache2/mods-enabled/php$1.load")" ]
+}
+
+# Does the SAPI serve requests now: its unit is active and, for mod_php, Apache loads the module.
+p2s_sapi_running() { # $1 branch, $2 sapi
+  local unit
+  unit=$(p2s_sapi_unit "$1" "$2")
+  [ -n "$unit" ] || return 1
+  [ "$2" != apache2 ] || p2s_modphp_loaded "$1" || return 1
+  [ "$(systemctl is-active "$unit" </dev/null 2>/dev/null)" = active ]
+}
+
+# The branch's CLI binary with Apache's php.ini and conf.d: mod_php has no binary of its own to ask, and
+# libapache2-mod-php depends on the CLI of its branch.
+p2s_php_apache2() { # $1 branch, then php arguments
+  local b=$1
+  shift
+  PHP_INI_SCAN_DIR=$(p2s_path "/etc/php/$b/apache2/conf.d") "php$b" -c "$(p2s_path "/etc/php/$b/apache2/php.ini")" "$@" </dev/null
+}
+
 # Effective master value in a SAPI, from the SAPI binary itself: On | Off | unknown.
-# php-fpm -i prints "key => local => master"; php-cgi -i prints an HTML table row.
-p2s_upload_progress() { # $1 branch, $2 sapi (fpm|cgi)
-  local bin out v
-  case $2 in fpm) bin=php-fpm$1 ;; cgi) bin=php-cgi$1 ;; *) echo unknown; return ;; esac
-  out=$("$bin" -i </dev/null 2>/dev/null) || { echo unknown; return; }
+# php-fpm -i and php -i print "key => local => master"; php-cgi -i prints an HTML table row.
+p2s_upload_progress() { # $1 branch, $2 sapi (fpm|cgi|apache2)
+  local out v
+  case $2 in
+    fpm) out=$("php-fpm$1" -i </dev/null 2>/dev/null) ;;
+    cgi) out=$("php-cgi$1" -i </dev/null 2>/dev/null) ;;
+    apache2) out=$(p2s_php_apache2 "$1" -i 2>/dev/null) ;;
+    *) false ;;
+  esac || { echo unknown; return; }
   v=$(sed -nE 's/<[^>]*>/ /g; s/^[[:space:]]*session\.upload_progress\.enabled[[:space:]]+(=>[[:space:]]*)?([A-Za-z]+).*/\2/p' <<<"$out" | head -1)
   case $v in On | Off) echo "$v" ;; *) echo unknown ;; esac
 }
@@ -78,11 +110,13 @@ p2s_mitigation_report() {
     upload_progress="$value" overrides="$enabling" state="$P2S_MSTATE"
 }
 
-# Installed web SAPIs, one "branch sapi" per line (8.3 fpm), from php<X.Y>-fpm and php<X.Y>-cgi packages.
+# Installed web SAPIs, one "branch sapi" per line (8.3 fpm), from the php<X.Y>-fpm, php<X.Y>-cgi and
+# libapache2-mod-php<X.Y> (SAPI apache2) packages.
 p2s_web_sapis() {
-  dpkg-query -W -f='${db:Status-Abbrev}|${binary:Package}\n' 'php*-fpm' 'php*-cgi' </dev/null 2>/dev/null \
-    | awk -F'|' '$1 ~ /^ii/ && $2 ~ /^php[0-9]+\.[0-9]+-(fpm|cgi)$/ {
-        s = $2; sub(/^php/, "", s); split(s, a, "-"); print a[1], a[2] }' | sort -u
+  dpkg-query -W -f='${db:Status-Abbrev}|${binary:Package}\n' 'php*-fpm' 'php*-cgi' 'libapache2-mod-php*' </dev/null 2>/dev/null \
+    | awk -F'|' '$1 !~ /^ii/ { next }
+      $2 ~ /^php[0-9]+\.[0-9]+-(fpm|cgi)$/ { s = $2; sub(/^php/, "", s); split(s, a, "-"); print a[1], a[2] }
+      $2 ~ /^libapache2-mod-php[0-9]+\.[0-9]+$/ { s = $2; sub(/^libapache2-mod-php/, "", s); print s, "apache2" }' | sort -u
 }
 
 # Does the SAPI still load its config? FPM has a config test; CGI has none, so the binary must at least
@@ -178,8 +212,9 @@ p2s_hook_script() {
   echo '# installed later included. It never fails: apt must not depend on it. Log:' "$P2S_HOOK_LOG"
   printf 'export P2S_ROOT=%q\n' "${P2S_ROOT:-}"
   declare -p P2S_SCHEMA P2S_INI_MARKER P2S_INI_LEGACY P2S_HOOK_LOG
-  declare -f p2s_path p2s_record p2s_os p2s_ini_content p2s_ini_owner p2s_ini_disables p2s_upload_progress \
-    p2s_fpm_overrides p2s_mitigation_report p2s_web_sapis p2s_config_ok p2s_ensure_sapi p2s_hook_run
+  declare -f p2s_path p2s_record p2s_os p2s_ini_content p2s_ini_owner p2s_ini_disables p2s_sapi_unit \
+    p2s_modphp_loaded p2s_sapi_running p2s_php_apache2 p2s_upload_progress p2s_fpm_overrides p2s_mitigation_report \
+    p2s_web_sapis p2s_config_ok p2s_ensure_sapi p2s_hook_run
   echo 'export LC_ALL=C'
   echo 'p2s_hook_run'
   echo 'exit 0'

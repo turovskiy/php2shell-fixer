@@ -3,7 +3,8 @@
 # branch.sh):
 # run.sh audit <host>
 # Output: a human-readable section plus "@p2s" records (schema in p2s.sh): one "branch" record per PHP-FPM
-# branch with its verdict and target, one "candidate" record per build apt offers for it, and one
+# or mod_php (SAPI apache2) branch with its verdict and target, one "candidate" record per build apt offers
+# for it, and one
 # "mitigation" record (plus "override" records) per web SAPI, then the host facts: web servers, sites and
 # pools, held packages, PPA sources with their Release info, unattended-upgrades.
 set -u
@@ -15,28 +16,30 @@ os=$(p2s_os)
 echo "== php2shell audit: $host ($os)"
 p2s_record kind=host host="$host" os="$os"
 
-# Installed PHP-FPM packages of a versioned branch (php8.3-fpm), not the php-fpm metapackage or removed ones.
-pkgs=$(dpkg-query -W -f='${db:Status-Abbrev}|${binary:Package}|${Version}\n' 'php*-fpm' </dev/null 2>/dev/null \
-  | awk -F'|' '$1 ~ /^ii/ && $2 ~ /^php[0-9]+\.[0-9]+-fpm$/ {print $2 "|" $3}')
-[ -n "$pkgs" ] || echo "no PHP-FPM branch installed"
+# Installed PHP-FPM and mod_php packages of a versioned branch, one "branch|sapi|package|version" per line.
+pkgs=$(p2s_branch_packages)
+[ -n "$pkgs" ] || echo "no PHP-FPM or mod_php branch installed"
 
 # Candidate .debs are fetched into one temp dir that goes away however the audit ends.
 P2S_TMP=$(mktemp -d)
 trap 'rm -rf "$P2S_TMP"' EXIT
 
-while IFS='|' read -r pkg ver; do
-  [ -n "$pkg" ] || continue
-  branch=${pkg#php}
-  branch=${branch%-fpm}
-  active=$(systemctl is-active "php$branch-fpm" </dev/null 2>/dev/null)
-  p2s_branch_eval "$host" "$branch" "$ver"
-  read -r started installed_at restart <<<"$(p2s_restart_state "$branch" "$active")"
+while IFS='|' read -r branch sapi pkg ver; do
+  [ -n "$branch" ] || continue
+  # mod_php counts as running only while Apache loads it; an installed module left disabled serves nothing.
+  if [ "$sapi" = apache2 ] && ! p2s_modphp_loaded "$branch"; then
+    active=not-loaded
+  else
+    active=$(systemctl is-active "$(p2s_sapi_unit "$branch" "$sapi")" </dev/null 2>/dev/null)
+  fi
+  p2s_branch_eval "$host" "$branch" "$ver" "$pkg" "$sapi"
+  read -r started installed_at restart <<<"$(p2s_restart_state "$branch" "$active" "$sapi")"
 
-  echo "php$branch fpm: $ver ($BR_ORIGIN, $active), CVEs in changelog: $BR_CVE -> $BR_VERDICT ($BR_REASON), target $BR_TARGET ($BR_TREASON)"
+  echo "php$branch $sapi: $ver ($BR_ORIGIN, $active), CVEs in changelog: $BR_CVE -> $BR_VERDICT ($BR_REASON), target $BR_TARGET ($BR_TREASON)"
   echo "  started $started, packages installed $installed_at: restart $restart"
   echo "  $BR_ORIGIN apt lists last changed: $BR_LISTS (older than the fixes: $BR_STALE)"
   [ ${#BR_CHUMAN[@]} -eq 0 ] || printf '%s\n' "${BR_CHUMAN[@]}"
-  p2s_record kind=branch host="$host" branch="$branch" sapi=fpm installed="$ver" origin="$BR_ORIGIN" \
+  p2s_record kind=branch host="$host" branch="$branch" sapi="$sapi" installed="$ver" origin="$BR_ORIGIN" \
     active="${active:-unknown}" cve_changelog="$BR_CVE" verdict="$BR_VERDICT" reason="$BR_REASON" \
     target="$BR_TARGET" target_reason="$BR_TREASON" lists_updated="$BR_LISTS" lists_stale="$BR_STALE" \
     started="$started" installed_at="$installed_at" restart="$restart"
@@ -70,10 +73,8 @@ echo "nginx: $nginx_state, apache2: $apache"
 sites=$(p2s_nginx_sites "$ngx")
 
 pools=()
-while IFS='|' read -r pkg ver; do
-  [ -n "$pkg" ] || continue
-  branch=${pkg#php}
-  branch=${branch%-fpm}
+while IFS='|' read -r branch sapi pkg ver; do
+  [ "$sapi" = fpm ] || continue
   while IFS='|' read -r pool listen; do
     [ -n "$pool" ] || continue
     pools+=("$branch|$pool|$listen")

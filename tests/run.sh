@@ -65,6 +65,7 @@ dpkglists() { # dpkglists <host> <date> <package>...
 dpkglists web-j '2026-10-22 06:00:00 UTC' php8.3-fpm php8.3-common
 dpkglists web-j '2026-10-24 06:00:00 UTC' php8.4-fpm
 dpkglists web-j '2026-10-24 07:00:00 UTC' php8.4-opcache
+dpkglists web-l '2026-10-22 06:00:00 UTC' libapache2-mod-php8.3 php8.3-common
 # apt-helper is called by absolute path, so it goes into the fake root of every host with remote/ fixtures:
 # "download-file URL DEST" copies remote/<URL with / and : as _> to DEST.
 for h in "$WORK"/hosts/*/; do
@@ -242,10 +243,20 @@ echo "systemd[1]: $u.service: Main process exited, code=exited, status=78/CONFIG
 echo "systemd[1]: Failed to start $u.service - The PHP FastCGI Process Manager."'
 # SAPI binaries: the effective upload_progress comes from the fake root's ini files, last assignment wins
 # (php.ini, then conf.d in order). A host without /etc/php/<X.Y>/<sapi> behaves as if the binary failed.
+# The CLI binary php<X.Y> reads its php.ini from "-c <file>" and its conf.d from PHP_INI_SCAN_DIR, as PHP
+# does, so it answers for mod_php when given Apache's ini; without them it reads its own cli/ dir.
 # fail-t-<binary> in the host fixture makes the config test fail (FPM: exit 78; CGI: an ini error on stderr).
 SAPI_STUB='n=${0##*/}
-case $n in php-fpm*) s=fpm b=${n#php-fpm} ;; *) s=cgi b=${n#php-cgi} ;; esac
-d=$P2S_ROOT/etc/php/$b/$s
+case $n in
+  php-fpm*) s=fpm b=${n#php-fpm} ;;
+  php-cgi*) s=cgi b=${n#php-cgi} ;;
+  *) s=cli b=${n#php} ;;
+esac
+d=$P2S_ROOT/etc/php/$b/$s ini=$d/php.ini scan=$d/conf.d
+if [ "$s" = cli ]; then
+  scan=${PHP_INI_SCAN_DIR:-$scan}
+  [ "${1:-}" = -c ] && { ini=$2 d=$(dirname "$2"); shift 2; }
+fi
 case $1 in
   -t)
     [ -e "$P2S_STUB/fail-t-$n" ] && { echo "ERROR: failed to load configuration file $d/conf.d/99-security.ini" >&2; exit 78; }
@@ -258,23 +269,37 @@ case $1 in
   -i)
     [ -d "$d" ] || exit 1
     v=On
-    for f in "$d/php.ini" "$d"/conf.d/*.ini; do
+    for f in "$ini" "$scan"/*.ini; do
       [ -f "$f" ] || continue
       x=$(sed -nE "s/^[[:space:]]*session\.upload_progress\.enabled[[:space:]]*=[[:space:]]*\"?([^\";[:space:]]+).*/\1/p" "$f" | tail -1)
       [ -n "$x" ] || continue
       case ${x,,} in 0 | off | false | no) v=Off ;; *) v=On ;; esac
     done
-    if [ "$s" = fpm ]; then echo "session.upload_progress.enabled => $v => $v"
-    else echo "<tr><td class=\"e\">session.upload_progress.enabled</td><td class=\"v\">$v</td><td class=\"v\">$v</td></tr>"; fi ;;
+    if [ "$s" = cgi ]; then echo "<tr><td class=\"e\">session.upload_progress.enabled</td><td class=\"v\">$v</td><td class=\"v\">$v</td></tr>"
+    else echo "session.upload_progress.enabled => $v => $v"; fi ;;
 esac'
-for b in 7.4 8.1 8.2 8.3 8.4 8.5; do stub "php-fpm$b" "$SAPI_STUB"; stub "php-cgi$b" "$SAPI_STUB"; done
+for b in 7.4 8.1 8.2 8.3 8.4 8.5; do stub "php-fpm$b" "$SAPI_STUB"; stub "php-cgi$b" "$SAPI_STUB"; stub "php$b" "$SAPI_STUB"; done
+# apachectl: absent (127) without /etc/apache2 in the fake root; "configtest" fails on fail-configtest in the
+# host fixture; "-S" prints the host's apachectl-S.txt, the vhost dump as Apache prints it.
+stub apachectl '[ -d "$P2S_ROOT/etc/apache2" ] || { echo "apachectl: command not found" >&2; exit 127; }
+case $1 in
+  configtest)
+    if [ -e "$P2S_STUB/fail-configtest" ]; then
+      echo "AH00526: Syntax error on line 4 of /etc/apache2/sites-enabled/shop.conf:" >&2
+      echo "Action '"'"'configtest'"'"' failed." >&2
+      exit 1
+    fi
+    echo "Syntax OK" >&2 ;;
+  -S) cat "$P2S_STUB/apachectl-S.txt" 2>/dev/null ;;
+esac
+exit 0'
 export PATH="$WORK/bin:$PATH"
 # The audit's temp dir on the "host": must be empty again after every run.
 export TMPDIR=$WORK/hosttmp
 mkdir -p "$TMPDIR"
 
 # Calls an audit may make; anything else in the stub log is a write or a package operation.
-READ_ONLY='^(ssh (-o [^ ]+ )*[^ ]+ bash -s|hostname ?|dpkg-query .*|systemctl is-active [^ ]+|systemctl show -p ActiveEnterTimestamp --value [^ ]+|dpkg --compare-versions .*|apt-cache madison [^ ]+|apt-get download -q [^ ]+|dpkg-deb --fsys-tarfile [^ ]+|php-(fpm|cgi)[0-9.]+ -i|apt-mark showhold|apt-config dump|nginx -T|apt-helper .* download-file [^ ]+ [^ ]+)$'
+READ_ONLY='^(ssh (-o [^ ]+ )*[^ ]+ bash -s|hostname ?|dpkg-query .*|systemctl is-active [^ ]+|systemctl show -p ActiveEnterTimestamp --value [^ ]+|dpkg --compare-versions .*|apt-cache madison [^ ]+|apt-get download -q [^ ]+|dpkg-deb --fsys-tarfile [^ ]+|php-(fpm|cgi)[0-9.]+ -i|php[0-9.]+ -c [^ ]+ -i|apt-mark showhold|apt-config dump|nginx -T|apt-helper .* download-file [^ ]+ [^ ]+)$'
 fingerprint() { (cd "$WORK/hosts" && find . -type f -exec md5sum {} + | sort); }
 
 echo "▸ verdict (installed build)"
@@ -492,6 +517,20 @@ has "$G" "kind=mitigation host=web-g branch=8.3 sapi=cgi ini=foreign action=insp
 has "$A" "kind=mitigation host=web-a branch=8.3 sapi=fpm ini=absent action=inspected upload_progress=unknown overrides=0 state=unknown" \
   "web-a: SAPI without readable config -> unknown, not mitigated"
 hasnt "$C" "kind=mitigation" "web-c: CLI only -> no mitigation records"
+
+echo "▸ audit: mod_php"
+L=$(bash "$S/run.sh" audit web-l); code=$?
+eq "$code" 0 "web-l: exit 0"
+has "$L" "kind=branch host=web-l branch=8.3 sapi=apache2 installed=8.3.6-0ubuntu0.24.04.12 origin=distro active=active cve_changelog=no verdict=unfixed reason=below-threshold target=8.3.6-0ubuntu0.24.04.13 target_reason=fixed-candidate" \
+  "web-l: Apache with mod_php 8.3 recorded as SAPI apache2, with its verdict and target"
+has "$L" "started=2026-10-20T06:00:00Z installed_at=2026-10-22T06:00:00Z restart=needed" \
+  "web-l: Apache started before the mod_php install -> restart needed"
+has "$L" "kind=candidate host=web-l branch=8.3 version=8.3.6-0ubuntu0.24.04.13 origin=distro cve_changelog=yes verdict=fixed reason=distro-threshold sapi=apache2" \
+  "web-l: mod_php candidate judged from its changelog"
+has "$L" "kind=mitigation host=web-l branch=8.3 sapi=apache2 ini=absent action=inspected upload_progress=On overrides=0 state=not-mitigated" \
+  "web-l: upload_progress read with Apache's php.ini and conf.d"
+hasnt "$L" "sapi=cli" "web-l: CLI is not a web SAPI"
+hasnt "$L" "sapi=fpm" "web-l: no FPM on a mod_php-only host"
 
 echo "▸ audit: read-only"
 WRITES=$(grep -vE "$READ_ONLY" "$STUB_LOG")
