@@ -1060,7 +1060,9 @@ has "$AY" "kind=uu_dryrun host=web-y result=ok exit=0 origins_allowed=LP-PPA-ond
 has "$AY" "kind=keeper host=web-y state=configured" "web-y: configured"
 has "$AY" "rm $PIN83" "web-y: rollback line for the pin"
 has "$AY" "rm $UUC" "web-y: rollback line for the origin entry"
-has "$(bash "$S/run.sh" audit web-y)" "kind=autoupdate host=web-y periodic=1 origins=4 ppa_covered=yes" "web-y: the audit now sees the PPA covered"
+YA=$(bash "$S/run.sh" audit web-y)
+LOG_YA=$(sed -n 's/^log: //p' <<<"$YA")
+has "$YA" "kind=autoupdate host=web-y periodic=1 origins=4 ppa_covered=yes" "web-y: the audit now sees the PPA covered"
 
 TY=$(tree web-y)
 : >"$STUB_LOG"
@@ -1144,6 +1146,12 @@ eq "$code" 1 "web-y without a cached Release file: exit 1"
 has "$AN" "Run apt-get update on the host" "web-y without a cached Release file: says what to do"
 eq "$(tree web-y)" "$TN" "web-y without a cached Release file: nothing written"
 
+# packages.sury.org's Release Origin is deb.sury.org: the audit counts it as the PPA covered, like the ondrej one.
+yreset
+mkdir -p "$(y /etc/apt/apt.conf.d)"
+printf '%s\n' 'Unattended-Upgrade::Allowed-Origins { "deb.sury.org:noble"; };' >"$(y /etc/apt/apt.conf.d/52sury)"
+has "$(bash "$S/run.sh" audit web-y)" "kind=autoupdate host=web-y periodic=1 origins=4 ppa_covered=yes" "audit: a deb.sury.org origin covers the PPA"
+
 yreset
 TN=$(tree web-y)
 AU=$(STUB_UID=1000 bash "$S/run.sh" autoupdate web-y); code=$?
@@ -1221,7 +1229,6 @@ has "$NX" "hook-missing: ensure - mitigated, but the apt hook that keeps it in p
 has "$NX" "needs-autoupdate: autoupdate - the ondrej PPA is configured, but unattended-upgrades does not install PHP updates from it" \
   "next: everything fixed, PPA not covered -> autoupdate"
 eq "$(wc -l <<<"$NX")" 14 "next: one line per host"
-LOG_YA=$(ls "$P2S_CACHE"/web-y-audit-*.log)
 eq "$(bash "$S/next.sh" "$LOG_YA" "$LOG_AY2")" "web-y: verify - autoupdate finished after the last audit; audit again to confirm" \
   "next: autoupdate after the audit -> verify"
 eq "$(bash "$S/next.sh" "$LOG_YA" "$LOG_AR")" "web-y: autoupdate - last autoupdate: exit-1, refused: php8.3 would change origin, pin that does not hold: $PIN83" \
