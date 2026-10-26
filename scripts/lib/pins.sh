@@ -8,14 +8,51 @@ p2s_pin_file() { echo "$P2S_PIN_DIR/php2shell-php$1.pref"; }   # $1 branch
 # The origin entry. apt.conf.d takes names with no extension or ".conf"; this one has none.
 P2S_UU_CONF=/etc/apt/apt.conf.d/51php2shell-ppa-origins
 
-# The PPA sources with what the cached Release file says about them, one "uri|suite|site|origin|label" per
-# line ("-" when apt has no cached Release file for the source). Origin and Label may hold spaces.
+# A file the keeper is about to overwrite is kept here first, not next to it: apt reads preferences.d and
+# apt.conf.d whole (apt.conf.d even names without an extension), and the keeper scans every file there.
+P2S_BACKUP_DIR=/var/lib/php2shell/backup
+p2s_backup() { # $1 file; prints the backup's path, returns 1 when the copy fails
+  local b
+  b=$P2S_BACKUP_DIR/${1##*/}.$(date -u +%Y%m%dT%H%M%SZ)
+  mkdir -p "$(p2s_path "$P2S_BACKUP_DIR")" && cp -p "$(p2s_path "$1")" "$(p2s_path "$b")" && echo "$b"
+}
+
+# A keeper file is written whole or not at all: the content goes to <file>.php2shell-new beside it, a name apt
+# skips in both apt.conf.d (no extension or ".conf") and preferences.d (no extension or ".pref"), and mv puts
+# it in place. A write that fails part-way (a full disk) removes the temp file and leaves the file as it was:
+# a truncated apt.conf.d file would break every apt run. Like the apt hook's files.
+P2S_NEW_SUFFIX=.php2shell-new
+p2s_write_file() { # $1 file, $2 content (written with a final newline)
+  local f
+  f=$(p2s_path "$1")
+  if mkdir -p "${f%/*}" && printf '%s\n' "$2" >"$f$P2S_NEW_SUFFIX" && mv -f "$f$P2S_NEW_SUFFIX" "$f" </dev/null; then
+    return 0
+  fi
+  rm -f "$f$P2S_NEW_SUFFIX"
+  return 1
+}
+# Put a backup from p2s_backup back the same way. $1 backup, $2 file.
+p2s_restore_file() {
+  local f
+  f=$(p2s_path "$2")
+  if cp -p "$(p2s_path "$1")" "$f$P2S_NEW_SUFFIX" && mv -f "$f$P2S_NEW_SUFFIX" "$f" </dev/null; then
+    return 0
+  fi
+  rm -f "$f$P2S_NEW_SUFFIX"
+  return 1
+}
+
+# The PPA's PHP sources with what the cached Release file says about them, one "uri|suite|site|origin|label"
+# per line ("-" when apt has no cached Release file for the source). Origin and Label may hold spaces. Only
+# ondrej/php and packages.sury.org/php: the same people's nginx and Apache PPAs ship no PHP, and accepting
+# their origin would let unattended-upgrades move nginx or Apache to them.
 p2s_ppa_releases() {
   local file uri suite site lists cached origin label
   lists=$(p2s_path /var/lib/apt/lists)
   while IFS='|' read -r file uri suite; do
     [ -n "$uri" ] || continue
     uri=${uri%/}
+    case $uri in */ondrej/php | */ondrej/php/* | *://packages.sury.org/php | *://packages.sury.org/php/*) ;; *) continue ;; esac
     site=${uri#*://}
     site=${site%%/*}
     cached=$lists/$(p2s_inrelease_name "$uri" "$suite")
@@ -35,15 +72,32 @@ p2s_php_packages() {
       $2 ~ /^libapache2-mod-php[0-9]+\.[0-9]+$/ { b = $2; sub(/^libapache2-mod-php/, "", b); print b "|" $2 "|" $3 }'
 }
 
-# What apt would do with a package now: "<installed> <candidate> <ppa>", ppa being yes when a PPA source offers
-# any build of it. "(none)" for no installed build or no candidate.
-p2s_policy() { # $1 package
-  local out inst cand ppa=no
+# A package's state in apt-cache policy now: "<installed> <candidate> <ppa> <installed origin> <candidate
+# origin> <held>", ppa being yes when a PPA source offers any build of it, "(none)" for no installed build or
+# no candidate. A build's origin is that of the first source listed under it (p2s_url_origin), from its
+# version string (p2s_origin) when no source there says ppa or distro, as for a build only in
+# /var/lib/dpkg/status. held: yes when every PPA build has a negative priority on its version line (where
+# apt shows a package pin; the source lines keep the source's own), no when one does not, - without PPA builds.
+p2s_policy_state() { # $1 package
+  local out inst cand ppa=no held=- io="" co="" v pr uri dist o
   out=$(apt-cache policy "$1" </dev/null 2>/dev/null)
   inst=$(sed -nE 's/^  Installed: (.*)$/\1/p' <<<"$out" | head -1)
   cand=$(sed -nE 's/^  Candidate: (.*)$/\1/p' <<<"$out" | head -1)
-  grep -qE '^ +-?[0-9]+ https?://[^ ]*(ondrej|sury)' <<<"$out" && ppa=yes
-  echo "${inst:-(none)} ${cand:-(none)} $ppa"
+  inst=${inst:-(none)} cand=${cand:-(none)}
+  # Version lines (" *** <version> <priority>" for the installed one) each followed by their source lines.
+  while IFS='|' read -r v pr uri dist; do
+    [ -n "$uri" ] || continue
+    o=$(p2s_url_origin "$uri" "$dist")
+    if [ "$o" = ppa ]; then
+      ppa=yes
+      if [ "$pr" -lt 0 ]; then [ "$held" = no ] || held=yes; else held=no; fi
+    fi
+    [ "$o" != other ] || continue
+    [ "$v" = "$inst" ] && [ -z "$io" ] && io=$o
+    [ "$v" = "$cand" ] && [ -z "$co" ] && co=$o
+  done < <(awk '/^ \*\*\* [^ ]+ -?[0-9]+$|^     [^ ]+ -?[0-9]+$/ { v = $(NF - 1); pr = $NF; next }
+    v != "" && /^ +-?[0-9]+ [a-z+]+:\/\// { print v "|" pr "|" $2 "|" $3 }' <<<"$out")
+  echo "$inst $cand $ppa ${io:-$(p2s_origin "$inst")} ${co:-$(p2s_origin "$cand")} $held"
 }
 
 # The pin the keeper writes for a branch, one stanza per PPA site.
@@ -90,7 +144,7 @@ p2s_pin_existing() { # $1 site, $2 origin, $3 label, $4 suite, then the branch's
   local site=$1 origin=$2 label=$3 suite=$4 f pk pin pr pats p pkg covered
   shift 4
   for f in "$(p2s_path /etc/apt/preferences)" "$(p2s_path "$P2S_PIN_DIR")"/*; do
-    [ -f "$f" ] || continue
+    [ -f "$f" ] && [[ $f != *"$P2S_NEW_SUFFIX" ]] || continue   # a temp file left by a killed write
     while IFS=$'\t' read -r pk pin pr; do
       [[ $pr =~ ^-[0-9]+$ ]] && p2s_pin_targets "$pin" "$site" "$origin" "$label" "$suite" || continue
       read -ra pats <<<"$pk"

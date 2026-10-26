@@ -4,9 +4,8 @@
 # run.sh audit <host>
 # Output: a human-readable section plus "@p2s" records (schema in p2s.sh): one "branch" record per PHP-FPM
 # or mod_php (SAPI apache2) branch with its verdict and target, one "candidate" record per build apt offers
-# for it, and one
-# "mitigation" record (plus "override" records) per web SAPI, then the host facts: web servers, sites and
-# pools, held packages, PPA sources with their Release info, unattended-upgrades.
+# for it, and one "mitigation" record (plus "override" records) per web SAPI, then the host facts: web
+# servers, sites and pools, held packages, PPA sources with their Release info, unattended-upgrades.
 set -u
 export LC_ALL=C
 
@@ -115,28 +114,12 @@ while read -r held; do
 done <<<"$(apt-mark showhold </dev/null 2>/dev/null | grep -E '^(php|libapache2-mod-php)')"
 
 # PPA sources, and whether their Release info changed since the cached lists: apt-get update refuses such a
-# source until someone accepts the change. The fresh InRelease is fetched into the temp dir; nothing else.
-helper=$(p2s_path /usr/lib/apt/apt-helper)
+# source until someone accepts the change.
 while IFS='|' read -r file uri suite; do
   [ -n "$uri" ] || continue
-  cached=$(p2s_path /var/lib/apt/lists)/$(p2s_inrelease_name "$uri" "$suite")
-  info=unknown changed=-
-  if [ -f "$cached" ] && [ -x "$helper" ]; then
-    dest=$P2S_TMP/InRelease.$suite
-    if timeout 30 "$helper" -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 \
-      download-file "${uri%/}/dists/$suite/InRelease" "$dest" </dev/null >/dev/null 2>&1; then
-      old=$(p2s_release_info "$(cat "$cached")")
-      new=$(p2s_release_info "$(cat "$dest")")
-      if [ "$old" = "$new" ]; then
-        info=same
-      else
-        info=changed
-        changed=$(diff <(echo "$old") <(echo "$new") | sed -nE 's/^[<>] ([A-Za-z]+):.*/\1/p' | sort -u | paste -sd, -)
-        diff <(echo "$old") <(echo "$new") | sed -nE 's/^< /  cached: /p; s/^> /  remote: /p'
-      fi
-    fi
-    rm -f "$dest"
-  fi
+  rc=$(p2s_release_check "$uri" "$suite")
+  read -r info changed <<<"$(head -1 <<<"$rc")"
+  tail -n +2 <<<"$rc"
   p2s_record kind=source host="$host" file="$file" uri="$uri" suite="$suite" release_info="$info" changed="$changed"
   echo "source $uri $suite ($file): release info $info$([ "$changed" = - ] || echo " ($changed)")"
 done <<<"$(p2s_php_sources)"

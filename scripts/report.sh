@@ -76,7 +76,7 @@ flush() { # print the current host section
   # A preflight stop leaves no branch rows, but the host has PHP: say nothing rather than "no PHP". A keeper
   # run is about apt, not about the SAPIs.
   [ ${#branches[@]} -gt 0 ] || [ ${#mitigations[@]} -gt 0 ] || [ ${#patches[@]} -gt 0 ] || [ "$mode_seen" = fix ] \
-    || [ "$mode_seen" = autoupdate ] || echo 'No PHP-FPM or PHP-CGI installed.'
+    || [ "$mode_seen" = autoupdate ] || echo 'No PHP-FPM, mod_php or PHP-CGI installed.'
   if [ ${#facts[@]} -gt 0 ]; then
     printf '\n### Host facts\n\n'
     printf '%s\n' "${facts[@]}"
@@ -239,7 +239,10 @@ while IFS=$'\t' read -r _ _ _ log; do
       policy)
         case ${r[state]} in
           kept) ks=kept ;;
-          *) ks="**${r[state]}**: ${r[moved]} would move" ;;
+          *)
+            if [ "${r[moved]}" != - ] || [ "${r[unheld]:--}" = - ]; then ks="**${r[state]}**: ${r[moved]} would move"
+            else ks="**${r[state]}**: PPA builds of ${r[unheld]} not held off"
+            fi ;;
         esac
         pn=${r[pin]}
         [ "$pn" = - ] || pn="\`$pn\`"
@@ -259,6 +262,7 @@ while IFS=$'\t' read -r _ _ _ log; do
         case ${r[result]} in
           ok) u="ok, accepts ${r[origins_allowed]}" ;;
           origin-missing) u="**the PPA origin is not among the accepted ones**" ;;
+          distro-from-ppa) u="**would upgrade ${r[from_ppa]//,/, } of a distro-built branch from the PPA**" ;;
           *) u="**failed** (exit ${r[exit]})" ;;
         esac
         klines+=("- unattended-upgrade --dry-run: $u")

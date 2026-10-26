@@ -68,15 +68,17 @@ dpkglists web-j '2026-10-24 07:00:00 UTC' php8.4-opcache
 dpkglists web-l '2026-10-22 06:00:00 UTC' libapache2-mod-php8.3 php8.3-common
 # apt-helper is called by absolute path, so it goes into the fake root of every host with remote/ fixtures:
 # "download-file URL DEST" copies remote/<URL with / and : as _> to DEST.
-for h in "$WORK"/hosts/*/; do
-  [ -d "$h/remote" ] || continue
-  mkdir -p "$h/root/usr/lib/apt"
+apthelper() { # apthelper <host dir>
+  mkdir -p "$1/root/usr/lib/apt"
   printf '%s\n' '#!/usr/bin/env bash' 'echo "apt-helper $*" >>"$STUB_LOG"' \
     'for a; do case $a in http*) url=$a ;; esac; done; dest=${!#}' \
     'src=$P2S_STUB/remote/$(printf %s "$url" | tr "/:" "__")' \
     '[ -f "$src" ] || { echo "E: Failed to fetch $url  404  Not Found" >&2; exit 100; }' \
-    'cp "$src" "$dest"' >"$h/root/usr/lib/apt/apt-helper"
-  chmod +x "$h/root/usr/lib/apt/apt-helper"
+    'cp "$src" "$dest"' >"$1/root/usr/lib/apt/apt-helper"
+  chmod +x "$1/root/usr/lib/apt/apt-helper"
+}
+for h in "$WORK"/hosts/*/; do
+  [ -d "$h/remote" ] && apthelper "$h"
 done
 
 for d in "$WORK"/hosts/*/debs/*/; do
@@ -101,6 +103,10 @@ derive web-s slow-install 3                        # connection drops mid-upgrad
 echo 1 >"$WORK/hosts/web-s/drop-after"
 derive web-u slow-install 5                        # connection drops; next run attaches to the running unit
 echo 1 >"$WORK/hosts/web-u/drop-after"
+# web-x's Apache listens on 127.0.0.1:8080 behind nginx: its vhosts answer plain http there and nowhere else.
+# Written here, not in the fixture: fixtures carry only package archive URLs.
+printf '%s\n' 'api.example.com 200 200' 'http://shop.example.com:8080 200 200 127.0.0.1' \
+  'http://www.shop.example.com:8080 301 301 127.0.0.1' 'http://blog.example.org:8080 200 200 127.0.0.1' >"$WORK/hosts/web-x/http.txt"
 # mod_php hosts: web-w is web-l with an Apache config that fails its configtest.
 cp -r "$WORK/hosts/web-l" "$WORK/hosts/web-w"
 : >"$WORK/hosts/web-w/fail-configtest"
@@ -120,7 +126,9 @@ stub() { # stub <name> <body>: a logging stub
 # ssh [-o opt]... <host> 'bash -s': the host is the second-to-last argument. A host with a "sleep" file
 # waits that many seconds first, to exercise the per-host timeout. A host with a "drop-after" file loses the
 # connection after that many seconds: like sshd on a dropped session, the whole session's process group
-# gets SIGHUP and then SIGKILL, children included (255). Only what left the session survives.
+# gets SIGHUP and then SIGKILL, children included (255). Only what left the session survives. A host with an
+# "fsize-limit" file runs the program with files capped at that many KiB and SIGXFSZ ignored: a write past
+# the cap fails part-way with an error, as on a full disk (output goes through a pipe, which the cap spares).
 stub ssh 'h=${@: -2:1}
 d=$P2S_TEST_HOSTS/$h
 [ -d "$d" ] || { echo "ssh: Could not resolve hostname $h: Name or service not known" >&2; exit 255; }
@@ -132,6 +140,11 @@ if [ -f "$d/drop-after" ]; then
   kill -HUP -- "-$pid" 2>/dev/null; sleep 0.2; kill -9 -- "-$pid" 2>/dev/null
   echo "Connection to $h closed by remote host." >&2
   exit 255
+fi
+if [ -f "$d/fsize-limit" ]; then
+  set -o pipefail
+  (trap "" XFSZ; ulimit -f "$(cat "$d/fsize-limit")"; P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h exec bash -s) | cat
+  exit
 fi
 P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h exec bash -s'
 stub hostname 'echo "$STUB_HOST"'
@@ -248,23 +261,37 @@ stub_priority() { # $1 package, $2 version, $3 uri, $4 suite
   done < <(stub_prefs_stanzas)
   echo 500
 }
-# apt-cache policy <package>: the builds from madison/<package>.txt with their priorities, the installed one from
-# dpkg-query.txt. The candidate is the build with the highest priority (never a negative one), the higher
-# version on a tie; a build older than the installed one does not replace it below priority 1000.
+# Priority of a source itself: the first "Package: *" stanza whose Pin matches it, else 500. A pin for named
+# packages changes a version's priority, never its source's.
+stub_file_priority() { # $1 uri, $2 suite
+  local pk pin pr
+  while IFS=$'\t' read -r pk pin pr; do
+    [ "$pk" = "*" ] && [[ $pin != version\ * ]] && stub_pin_matches "$pin" - "$1" "$2" && { echo "$pr"; return; }
+  done < <(stub_prefs_stanzas)
+  echo 500
+}
+# apt-cache policy <package>, laid out as apt >= 1.1 prints it: the builds from madison/<package>.txt, each on a
+# version line with its own priority (a package pin shows here), "***" marking the installed one, and under it
+# one line per source with that source's priority, plus /var/lib/dpkg/status under the installed build. The
+# installed build comes from dpkg-query.txt. The candidate is the build with the highest priority (never a
+# negative one), the higher version on a tie; a build older than the installed one does not replace it below
+# priority 1000.
 stub_policy() {
-  local pkg=$1 inst v src uri dist pr best="" bestp="" rows=() r
-  local -A prio
+  local pkg=$1 inst v src uri dist pr best="" bestp="" r order=()
+  local -A prio srcs
   inst=$(awk -F'|' -v p="$pkg" '$1 ~ /^ii/ && $2 == p {print $3}' "$P2S_STUB/dpkg-query.txt")
   while IFS='|' read -r _ v src; do
     v=${v// /}
     [ -n "$v" ] || continue
     read -r uri dist _ <<<"$src"
     pr=$(stub_priority "$pkg" "$v" "$uri" "${dist%%/*}")
-    rows+=("$v|$pr|$uri|$dist")
+    [ -n "${srcs[$v]+x}" ] || order+=("$v")
+    srcs[$v]+="$(stub_file_priority "$uri" "${dist%%/*}")|$uri|$dist"$'\n'
     if [ -z "${prio[$v]:-}" ] || [ "$pr" -gt "${prio[$v]}" ]; then prio[$v]=$pr; fi
   done 2>/dev/null <"$P2S_STUB/madison/$pkg.txt"
-  [ -n "$inst" ] || [ ${#rows[@]} -gt 0 ] || { echo "N: Unable to locate package $pkg" >&2; return; }
+  [ -n "$inst" ] || [ ${#order[@]} -gt 0 ] || { echo "N: Unable to locate package $pkg" >&2; return; }
   if [ -n "$inst" ]; then
+    [ -n "${srcs[$inst]+x}" ] || order+=("$inst")
     if [ -z "${prio[$inst]:-}" ] || [ "${prio[$inst]}" -lt 100 ]; then prio[$inst]=100; fi
   fi
   for v in "${!prio[@]}"; do
@@ -281,11 +308,13 @@ stub_policy() {
   echo "  Installed: ${inst:-(none)}"
   echo "  Candidate: ${best:-(none)}"
   echo "  Version table:"
-  for r in "${rows[@]}"; do
-    IFS='|' read -r v pr uri dist <<<"$r"
-    printf '     %s %s\n        %s %s %s amd64 Packages\n' "$v" "${prio[$v]}" "$pr" "$uri" "$dist"
+  for v in "${order[@]}"; do
+    if [ "$v" = "$inst" ]; then printf ' *** %s %s\n' "$v" "${prio[$v]}"; else printf '     %s %s\n' "$v" "${prio[$v]}"; fi
+    while IFS='|' read -r pr uri dist; do
+      [ -n "$uri" ] && printf '       %4s %s %s amd64 Packages\n' "$pr" "$uri" "$dist"
+    done <<<"${srcs[$v]:-}"
+    [ "$v" != "$inst" ] || printf '        100 /var/lib/dpkg/status\n'
   done
-  [ -z "$inst" ] || printf '        100 /var/lib/dpkg/status\n'
 }
 # apt-config dump: the host's apt-config.txt, then the unattended-upgrades origin lists of every apt.conf.d file
 # apt reads (no extension or ".conf", same name rule as preferences.d).
@@ -316,7 +345,10 @@ shift
 . "$P2S_STUBLIB/apt.sh"
 for p; do stub_policy "$p"; done'
 # unattended-upgrade --dry-run: prints the origins it accepts, as unattended-upgrades does, from the merged apt
-# config with ${distro_codename} filled in; fail-uu in the host fixture makes it fail.
+# config with ${distro_id} and ${distro_codename} filled in, then the packages it would upgrade: those of
+# uu-upgrades.txt ("<Release Origin> <package>", what this unattended-upgrades would take from which origin)
+# whose origin it accepts, on one "Packages that will be upgraded:" line. fail-uu makes it fail; slow-uu makes
+# it take that many seconds once it accepts the ondrej PPA.
 stub unattended-upgrade 'cat >/dev/null
 [ -e "$P2S_STUB/fail-uu" ] && { echo "E: unattended-upgrade: apt_pkg.Error: E:Unable to parse package file"; exit 1; }
 . "$P2S_STUBLIB/apt.sh"
@@ -325,7 +357,13 @@ allowed=$(stub_aptconf_dump | sed -nE "s/^Unattended-Upgrade::Allowed-Origins:: 
   | sed "s/\${distro_id}/Ubuntu/g; s/\${distro_codename}/$code/g" | paste -sd, - | sed "s/,o=/, o=/g; s/,origin=/, origin=/g")
 echo "Starting unattended upgrades script"
 echo "Allowed origins are: $allowed"
-echo "No packages found that can be upgraded unattended and no pending auto-removals"'
+case ", $allowed," in *", o=LP-PPA-ondrej-php,"*) [ -f "$P2S_STUB/slow-uu" ] && sleep "$(cat "$P2S_STUB/slow-uu")" ;; esac
+up=()
+while read -r o p; do
+  case ", $allowed," in *", o=$o,"* | *", origin=$o,"*) up+=("$p") ;; esac
+done 2>/dev/null <"$P2S_STUB/uu-upgrades.txt"
+if [ ${#up[@]} -gt 0 ]; then echo "Packages that will be upgraded: ${up[*]}"
+else echo "No packages found that can be upgraded unattended and no pending auto-removals"; fi'
 # "apt-get download pkg=ver" leaves a .deb naming its fixture; a version without a fixture is not found.
 # apt-get and dpkg-deb drain stdin, as a prompting tool would: the audit itself arrives on stdin, so a call
 # without </dev/null swallows the rest of the program (or the remaining branches) and records go missing.
@@ -388,13 +426,25 @@ while [ $# -gt 0 ]; do case $1 in --unit=*) unit=${1#--unit=} ;; --*) ;; *) brea
 mkdir -p "$P2S_STUB/units"
 setsid "$@" </dev/null >/dev/null 2>&1 &
 echo $! >"$P2S_STUB/units/$unit.pid"'
-# curl ... https://<name>/: http.txt holds "<name> <code before> <code after>"; the first call per name
-# answers the first code, later calls the second. A name not listed answers 000, as curl does on no reply.
-stub curl 'n=${!#}; n=${n#https://}; n=${n%/}
-line=$(grep "^$n " "$P2S_STUB/http.txt" 2>/dev/null)
+# curl ... --resolve <name>:<port>:<addr> <scheme>://<name>[:<port>]/: http.txt holds "<site> <code before>
+# <code after> [<address>]", <site> being the name for https on 443 and "<scheme>://<name>:<port>" otherwise; an
+# address there is the one the vhost listens on, and nothing answers at another. As in curl, a --resolve entry
+# counts only for the URL's own name and port, and these .example names resolve nowhere else (exit 6). The
+# first call per site answers the first code, later calls the second. A site not listed answers 000 (exit 7).
+stub curl 'url=${!#} res="" prev=""
+for a; do [ "$prev" = --resolve ] && res=$a; prev=$a; done
+scheme=${url%%://*} hp=${url#*://}; hp=${hp%%/*}
+name=${hp%%:*} port=${hp#"${hp%%:*}"}; port=${port#:}
+[ -n "$port" ] || { [ "$scheme" = https ] && port=443 || port=80; }
+case $res in "$name:$port:"*) addr=${res#"$name:$port:"} ;; *) printf 000; exit 6 ;; esac
+key=$name; [ "$scheme:$port" = https:443 ] || key=$scheme://$name:$port
+line=$(awk -v k="$key" "\$1 == k" "$P2S_STUB/http.txt" 2>/dev/null)
 [ -n "$line" ] || { printf 000; exit 7; }
-if [ -e "$P2S_STUB/.curl-$n" ]; then awk "{printf \"%s\", \$3}" <<<"$line"
-else : >"$P2S_STUB/.curl-$n"; awk "{printf \"%s\", \$2}" <<<"$line"; fi'
+listen=$(awk "{print \$4}" <<<"$line")
+[ -z "$listen" ] || [ "$listen" = "$addr" ] || { printf 000; exit 7; }
+mark=$P2S_STUB/.curl-${key//[\/:]/_}
+if [ -e "$mark" ]; then awk "{printf \"%s\", \$3}" <<<"$line"
+else : >"$mark"; awk "{printf \"%s\", \$2}" <<<"$line"; fi'
 stub journalctl 'u=${2%.service}
 echo "systemd[1]: $u.service: Main process exited, code=exited, status=78/CONFIG"
 echo "systemd[1]: Failed to start $u.service - The PHP FastCGI Process Manager."'
@@ -437,8 +487,29 @@ case $1 in
 esac'
 for b in 7.4 8.1 8.2 8.3 8.4 8.5; do stub "php-fpm$b" "$SAPI_STUB"; stub "php-cgi$b" "$SAPI_STUB"; stub "php$b" "$SAPI_STUB"; done
 # apachectl: absent (127) without /etc/apache2 in the fake root; "configtest" fails on fail-configtest in the
-# host fixture; "-S" prints the host's apachectl-S.txt, the vhost dump as Apache prints it.
+# host fixture; "-S" prints the host's apachectl-S.txt, the vhost dump as Apache prints it; "-t -D
+# DUMP_INCLUDES" follows Include and IncludeOptional from apache2.conf as Apache does (globs, paths relative to
+# /etc/apache2) and prints every file read, "(*)" for the main one and the including line for the others,
+# indented by depth; fail-dump-includes makes it fail as on a broken config.
 stub apachectl '[ -d "$P2S_ROOT/etc/apache2" ] || { echo "apachectl: command not found" >&2; exit 127; }
+if [ "$1" = -t ] && [ "${3:-}" = DUMP_INCLUDES ]; then
+  [ -e "$P2S_STUB/fail-dump-includes" ] && { echo "AH00526: Syntax error on line 4 of /etc/apache2/apache2.conf:" >&2; exit 1; }
+  inc() { # inc <file> <depth> <label>
+    local n=0 line kw pat g
+    printf "%*s(%s) %s\n" $(($2 * 2)) "" "$3" "${1#"$P2S_ROOT"}"
+    while IFS= read -r line; do
+      n=$((n + 1))
+      read -r kw pat _ <<<"$line"
+      case ${kw,,} in include | includeoptional) ;; *) continue ;; esac
+      [[ $pat == /* ]] || pat=/etc/apache2/$pat
+      for g in $P2S_ROOT$pat; do [ -f "$g" ] && inc "$g" $(($2 + 1)) "$n"; done
+    done <"$1"
+  }
+  echo "Included configuration files:"
+  inc "$P2S_ROOT/etc/apache2/apache2.conf" 1 "*"
+  echo "Syntax OK" >&2
+  exit 0
+fi
 case $1 in
   configtest)
     if [ -e "$P2S_STUB/fail-configtest" ]; then
@@ -456,7 +527,7 @@ export TMPDIR=$WORK/hosttmp
 mkdir -p "$TMPDIR"
 
 # Calls an audit may make; anything else in the stub log is a write or a package operation.
-READ_ONLY='^(ssh (-o [^ ]+ )*[^ ]+ bash -s|hostname ?|dpkg-query .*|systemctl is-active [^ ]+|systemctl show -p ActiveEnterTimestamp --value [^ ]+|dpkg --compare-versions .*|apt-cache madison [^ ]+|apt-get download -q [^ ]+|dpkg-deb --fsys-tarfile [^ ]+|php-(fpm|cgi)[0-9.]+ -i|php[0-9.]+ -c [^ ]+ -i|apt-mark showhold|apt-config dump|nginx -T|apt-helper .* download-file [^ ]+ [^ ]+)$'
+READ_ONLY='^(ssh (-o [^ ]+ )*[^ ]+ bash -s|hostname ?|apachectl -t -D DUMP_INCLUDES|dpkg-query .*|systemctl is-active [^ ]+|systemctl show -p ActiveEnterTimestamp --value [^ ]+|dpkg --compare-versions .*|apt-cache madison [^ ]+|apt-get download -q [^ ]+|dpkg-deb --fsys-tarfile [^ ]+|php-(fpm|cgi)[0-9.]+ -i|php[0-9.]+ -c [^ ]+ -i|apt-mark showhold|apt-config dump|nginx -T|apt-helper .* download-file [^ ]+ [^ ]+)$'
 fingerprint() { (cd "$WORK/hosts" && find . -type f -exec md5sum {} + | sort); }
 
 echo "▸ verdict (installed build)"
@@ -468,6 +539,8 @@ echo "▸ verdict (installed build)"
 . "$S/lib/mitigation.sh"
 # shellcheck source=../scripts/lib/hostfacts.sh
 . "$S/lib/hostfacts.sh"
+# shellcheck source=../scripts/lib/pins.sh
+. "$S/lib/pins.sh"
 vd() { p2s_verdict "$1" "$2" "$(p2s_origin "$2")" "$3"; }
 eq "$(vd 8.3 8.3.6-0ubuntu0.24.04.12 no)" "unfixed below-threshold" "Ubuntu 8.3 .12 unfixed"
 eq "$(vd 8.3 8.3.6-0ubuntu0.24.04.13 yes)" "fixed distro-threshold" "Ubuntu 8.3 .13 fixed"
@@ -485,6 +558,15 @@ eq "$(vd 8.5 8.5.12-1+ubuntu24.04.1+deb.sury.org+1 no)" "fixed upstream-threshol
 eq "$(vd 8.0 1:8.0.30-9+ubuntu24.04.1+deb.sury.org+1 missing)" "unfixed no-cve-in-changelog" "missing changelog is not a fix"
 eq "$(p2s_origin 8.3.6-0ubuntu0.24.04.13) $(p2s_origin 1:7.4.33-31+ubuntu24.04.1+deb.sury.org+1) $(p2s_origin 8.2.29-1~deb12u1) $(p2s_origin 8.3.36-1)" \
   "distro ppa distro other" "origin: Ubuntu, sury, Debian, other"
+eq "$(p2s_origin 8.3.27-1+0~20251023.80+debian13~1.gbp1a2b3c) $(p2s_origin 8.4.11-1)" "ppa other" \
+  "origin: sury's Debian build (+debian13) is the PPA's; a plain Debian revision stays other"
+eq "$(p2s_url_origin https://ppa.launchpadcontent.net/ondrej/php/ubuntu noble/main) \
+$(p2s_url_origin https://packages.sury.org/php/ trixie/main) \
+$(p2s_url_origin http://security.ubuntu.com/ubuntu noble-security/universe) \
+$(p2s_url_origin http://deb.debian.org/debian trixie/main) \
+$(p2s_url_origin http://security.debian.org/debian-security trixie-security/main) \
+$(p2s_url_origin https://repo.example.com/php noble/main)" \
+  "ppa ppa distro distro distro other" "source origin: by URL and suite, as apt names the list files"
 p2s_changelog_has_cves "  - debian/patches/CVE-2026-109618_109619.patch" && ok "Ubuntu patch name counts as both CVEs" \
   || bad "Ubuntu patch name counts as both CVEs"
 p2s_changelog_has_cves "  - CVE-2026-109618 only" && bad "one CVE alone is not a fix" || ok "one CVE alone is not a fix"
@@ -546,12 +628,16 @@ VirtualHost configuration:
                  wild alias *.shop.example.com
          port 443 namevhost blog.example.org (/etc/apache2/sites-enabled/blog.conf:1)
 *:80                   static.example.net (/etc/apache2/sites-enabled/static.conf:1)
+127.0.0.1:8080         is a NameVirtualHost
+         default server loop.example.org (/etc/apache2/sites-enabled/loop.conf:1)
+         port 8080 namevhost loop.example.org (/etc/apache2/sites-enabled/loop.conf:1)
 [2001:db8::1]:443      v6.example.com (/etc/apache2/sites-enabled/v6.conf:1)
 ServerRoot: "/etc/apache2"
 Main DocumentRoot: "/var/www/html"
 User: name="www-data" id=33'
-eq "$(p2s_apache_sites "$AS")" "$(printf '%s\n' blog.example.org shop.example.com static.example.net v6.example.com www.shop.example.com)" \
-  "apachectl -S: name-based vhosts, aliases and single vhosts, once each; wildcard aliases and settings skipped"
+eq "$(p2s_apache_sites "$AS")" "$(printf '%s\n' 'blog.example.org|443|-' 'loop.example.org|8080|127.0.0.1' 'shop.example.com|443|-' \
+  'static.example.net|80|-' 'v6.example.com|443|[2001:db8::1]' 'www.shop.example.com|443|-')" \
+  "apachectl -S: name-based vhosts, aliases and single vhosts with port and address, once each; wildcards and settings skipped"
 eq "$(p2s_inrelease_name https://ppa.launchpadcontent.net/ondrej/php/ubuntu/ noble)" \
   "ppa.launchpadcontent.net_ondrej_php_ubuntu_dists_noble_InRelease" "cached InRelease name, trailing slash ignored"
 eq "$(p2s_release_info "$(printf 'Origin: X\nLabel: A B\nDate: now\nSuite: noble\n')")" "$(printf 'Label: A B\nOrigin: X\nSuite: noble')" \
@@ -792,6 +878,22 @@ has "$V" "kind=mitigation host=web-v branch=7.4 sapi=apache2 ini=absent action=w
 eq "$(grep -E '^systemctl (reload|restart|stop|start) ' "$STUB_LOG")" "systemctl reload apache2" "web-v: Apache reloaded once, nothing restarted"
 has "$V" "rm /etc/php/8.3/apache2/conf.d/99-security.ini && systemctl reload apache2" "web-v: rollback line reloads Apache"
 
+# A site config pulled in by a custom Include outside the Debian layout: Apache's own include dump finds it.
+# Without a working dump (a broken config), the scan falls back to the Debian globs.
+AI=$WORK/apache-inc
+cp -r "$WORK/hosts/web-v" "$AI"
+mkdir -p "$AI/root/etc/apache2/custom"
+echo 'Include /etc/apache2/custom/*.conf' >>"$AI/root/etc/apache2/apache2.conf"
+printf '%s\n' '<Directory /var/www/legacy>' '  php_admin_flag session.upload_progress.enabled on' '</Directory>' >"$AI/root/etc/apache2/custom/legacy.conf"
+OV=$(P2S_ROOT=$AI/root P2S_STUB=$AI p2s_apache_overrides)
+has "$OV" "$AI/root/etc/apache2/custom/legacy.conf|2|-|php_admin_flag|on|yes" "Apache overrides: a custom Include is scanned"
+has "$OV" "$AI/root/etc/apache2/sites-enabled/shop.conf|6|-|php_admin_flag|on|yes" "Apache overrides: enabled sites still scanned"
+hasnt "$OV" "old.conf" "Apache overrides: a site that is not enabled is still not scanned"
+: >"$AI/fail-dump-includes"
+OV=$(P2S_ROOT=$AI/root P2S_STUB=$AI p2s_apache_overrides)
+hasnt "$OV" "legacy.conf" "Apache overrides without a working include dump: Debian globs only"
+has "$OV" "$AI/root/etc/apache2/sites-enabled/shop.conf|6|" "Apache overrides without a working include dump: enabled sites scanned"
+
 BEFORE_ROOT=$(fingerprint)
 NR=$(STUB_UID=1000 bash "$S/run.sh" ensure web-h); code=$?
 eq "$code" 1 "not root: exit 1"
@@ -995,10 +1097,10 @@ has "$X" "kind=mitigation host=web-x branch=8.3 sapi=fpm ini=absent action=writt
   "web-x: FPM mitigated"
 has "$X" "rm /etc/php/8.3/apache2/conf.d/99-security.ini && systemctl reload apache2" "web-x: rollback line for the mod_php ini"
 has "$X" "kind=probe host=web-x name=api.example.com before=200 after=200" "web-x: nginx site probed"
-has "$X" "kind=probe host=web-x name=shop.example.com before=200 after=200" "web-x: Apache vhost probed"
-has "$X" "kind=probe host=web-x name=www.shop.example.com before=301 after=301" "web-x: Apache alias probed"
-has "$X" "kind=probe host=web-x name=blog.example.org before=200 after=200" "web-x: second Apache vhost probed"
-eq "$(grep -c 'kind=probe host=web-x name=shop.example.com ' <<<"$X")" 1 "web-x: a vhost listed as default server and as namevhost probed once"
+has "$X" "kind=probe host=web-x name=shop.example.com:8080 before=200 after=200" "web-x: Apache vhost probed over http on its own address and port"
+has "$X" "kind=probe host=web-x name=www.shop.example.com:8080 before=301 after=301" "web-x: Apache alias probed"
+has "$X" "kind=probe host=web-x name=blog.example.org:8080 before=200 after=200" "web-x: second Apache vhost probed"
+eq "$(grep -c 'kind=probe host=web-x name=shop.example.com:8080 ' <<<"$X")" 1 "web-x: a vhost listed as default server and as namevhost probed once"
 XR=$(bash "$S/report.sh" "$(ls "$P2S_CACHE"/web-x-fix-*.log)")
 has "$XR" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.12` | `8.3.6-0ubuntu0.24.04.13` | `8.3.6-0ubuntu0.24.04.13` | yes | done | same | fixed |' "report: FPM patch row"
 has "$XR" '| 8.3 | apache2 | `8.3.6-0ubuntu0.24.04.12` | `8.3.6-0ubuntu0.24.04.13` | `8.3.6-0ubuntu0.24.04.13` | yes | done | same | fixed |' "report: mod_php patch row"
@@ -1009,7 +1111,7 @@ has "$PR" "- Backup before the patch: \`/root/etc-php-" "report: backup named"
 has "$PR" "- HTTP probe: every status code unchanged" "report: probe unchanged"
 has "$PR" '- **Preflight stopped the patch: held**, held: `php8.3-fpm`' "report: preflight stop"
 has "$PR" '- `shop.example.com`: 200 -> 502 - **changed**' "report: changed site"
-hasnt "$PR" "No PHP-FPM or PHP-CGI installed." "report: a fix log is not an empty host"
+hasnt "$PR" "No PHP-FPM, mod_php or PHP-CGI installed." "report: a fix log is not an empty host"
 
 echo "▸ autoupdate"
 # A host's whole tree, directories included: the keeper must not even create one where it has nothing to do.
@@ -1056,7 +1158,7 @@ has "$AY" "kind=policy host=web-y branch=8.3 origin=distro package=php8.3-fpm in
 has "$AY" "kind=policy host=web-y branch=8.4 origin=ppa package=php8.4-fpm installed=8.4.17-1+ubuntu24.04.1+deb.sury.org+1 before=8.4.27-1+ubuntu24.04.1+deb.sury.org+1 candidate=8.4.27-1+ubuntu24.04.1+deb.sury.org+1 candidate_origin=ppa moved=- pin=- state=kept" \
   "web-y: 8.4 candidate stays the PPA's newer build"
 has "$(grep '^unattended-upgrade ' "$STUB_LOG")" "unattended-upgrade --dry-run" "web-y: unattended-upgrades dry run"
-has "$AY" "kind=uu_dryrun host=web-y result=ok exit=0 origins_allowed=LP-PPA-ondrej-php" "web-y: the dry run accepts the PPA origin"
+has "$AY" "kind=uu_dryrun host=web-y result=ok exit=0 origins_allowed=LP-PPA-ondrej-php from_ppa=-" "web-y: the dry run accepts the PPA origin"
 has "$AY" "kind=keeper host=web-y state=configured" "web-y: configured"
 has "$AY" "rm $PIN83" "web-y: rollback line for the pin"
 has "$AY" "rm $UUC" "web-y: rollback line for the origin entry"
@@ -1109,6 +1211,23 @@ has "$AI" "candidate=$SU835 candidate_origin=ppa moved=php8.3-fpm,php8.3-common 
 has "$AI" "mv /etc/apt/preferences.d/ondrej-php.conf /etc/apt/preferences.d/ondrej-php.pref" "web-y ignored pin: says how to make apt read it"
 [ -e "$(y $UUC)" ] && bad "web-y ignored pin: no origin entry" || ok "web-y ignored pin: no origin entry"
 
+# The same ignored pin while the PPA's 8.3 build sorts below Ubuntu's: the candidate stays the installed build
+# today, but the pin still holds nothing and the next PPA upload would move 8.3. apt-cache policy shows the PPA
+# build at its source's priority instead of -1, and that is what the keeper reads.
+yreset
+mkdir -p "$(y /etc/apt/preferences.d)"
+printf 'Package: php8.3*\nPin: origin ppa.launchpadcontent.net\nPin-Priority: -1\n' >"$(y /etc/apt/preferences.d/ondrej-php.conf)"
+sed -i "s/$SU835/8.3.5-1+ubuntu24.04.1+deb.sury.org+1/" "$WORK/hosts/web-y/madison/php8.3-fpm.txt" "$WORK/hosts/web-y/madison/php8.3-common.txt"
+AJ=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 1 "web-y ignored pin, PPA build lower: exit 1"
+has "$AJ" "candidate=$U83 candidate_origin=distro moved=- pin=/etc/apt/preferences.d/ondrej-php.conf state=pin-ineffective" \
+  "web-y ignored pin, PPA build lower: still detected as ineffective"
+has "$AJ" "unheld=php8.3-fpm,php8.3-common" "web-y ignored pin, PPA build lower: names the packages whose PPA builds keep a priority"
+has "$AJ" "mv /etc/apt/preferences.d/ondrej-php.conf /etc/apt/preferences.d/ondrej-php.pref" "web-y ignored pin, PPA build lower: says how to make apt read it"
+[ -e "$(y $UUC)" ] && bad "web-y ignored pin, PPA build lower: no origin entry" || ok "web-y ignored pin, PPA build lower: no origin entry"
+has "$(bash "$S/report.sh" "$(sed -n 's/^log: //p' <<<"$AJ")")" '**pin-ineffective**: PPA builds of php8.3-fpm,php8.3-common not held off' \
+  "report: a pin that holds nothing yet, though nothing would move today"
+
 # Equivalent config already in place under other names, in other forms: nothing written.
 yreset
 mkdir -p "$(y /etc/apt/preferences.d)" "$(y /etc/apt/apt.conf.d)"
@@ -1125,6 +1244,126 @@ has "$AE" "kind=uu_entry host=web-y value=LP-PPA-ondrej-php:noble file=- action=
 has "$AE" "candidate=$U83 candidate_origin=distro moved=- pin=/etc/apt/preferences.d/ubuntu-php state=kept" "web-y equivalent config: and it holds 8.3"
 has "$AE" "kind=keeper host=web-y state=unchanged" "web-y equivalent config: unchanged"
 
+# The ondrej/nginx PPA as well: its Release file is cached, but its packages are not PHP. Accepting its origin
+# would let unattended-upgrades move nginx to it, so the keeper leaves that source out.
+yreset
+printf 'deb https://ppa.launchpadcontent.net/ondrej/nginx/ubuntu noble main\n' >"$(y /etc/apt/sources.list.d/ondrej-nginx.list)"
+sed 's/LP-PPA-ondrej-php/LP-PPA-ondrej-nginx/; s/PPA for PHP/PPA for nginx/' \
+  "$(y /var/lib/apt/lists/ppa.launchpadcontent.net_ondrej_php_ubuntu_dists_noble_InRelease)" \
+  >"$(y /var/lib/apt/lists/ppa.launchpadcontent.net_ondrej_nginx_ubuntu_dists_noble_InRelease)"
+AG=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 0 "web-y with the ondrej/nginx PPA too: exit 0"
+eq "$(grep -o 'Allowed-Origins.*' "$(y $UUC)" 2>/dev/null)" 'Allowed-Origins { "LP-PPA-ondrej-php:noble"; };' \
+  "web-y with the ondrej/nginx PPA too: only the PHP PPA's origin accepted"
+hasnt "$AG" "ondrej/nginx" "web-y with the ondrej/nginx PPA too: the nginx PPA is not a PHP source"
+
+# web-y as a Debian trixie host with packages.sury.org: Debian's own 8.4.11-1 has no ~debNN suffix and sury's
+# Debian builds carry +debian13 and no "sury", so the version strings say nothing about origin. The keeper
+# reads it from the source apt-cache policy lists under the installed build and the candidate.
+SUD84=8.4.13-1+0~20251023.80+debian13~1.gbp1a2b3c SUD83=8.3.27-1+0~20251023.80+debian13~1.gbp1a2b3c
+ydeb() {
+  yreset
+  printf '%s\n' 'PRETTY_NAME="Debian GNU/Linux 13 (trixie)"' 'VERSION_ID="13"' 'VERSION_CODENAME=trixie' 'ID=debian' >"$(y /etc/os-release)"
+  rm "$(y /etc/apt/sources.list.d/ondrej-ubuntu-php-noble.sources)" "$(y /var/lib/apt/lists)"/*
+  printf 'deb https://packages.sury.org/php/ trixie main\n' >"$(y /etc/apt/sources.list.d/php.list)"
+  printf '%s\n' 'Origin: deb.sury.org' 'Label: PHP' 'Suite: trixie' 'Codename: trixie' \
+    >"$(y /var/lib/apt/lists/packages.sury.org_php_dists_trixie_InRelease)"
+  printf 'ii |%s|%s\n' php8.4-fpm 8.4.11-1 php8.4-common 8.4.11-1 php8.3-fpm "$SUD83" php8.3-common "$SUD83" \
+    >"$WORK/hosts/web-y/dpkg-query.txt"
+  rm "$WORK/hosts/web-y/madison"/*
+  for p in php8.4-fpm php8.4-common; do
+    printf ' %s | %s | %s\n' "$p" "$SUD84" 'https://packages.sury.org/php trixie/main amd64 Packages' \
+      "$p" 8.4.11-1 'http://deb.debian.org/debian trixie/main amd64 Packages' >"$WORK/hosts/web-y/madison/$p.txt"
+  done
+  for p in php8.3-fpm php8.3-common; do
+    printf ' %s | %s | %s\n' "$p" "$SUD83" 'https://packages.sury.org/php trixie/main amd64 Packages' >"$WORK/hosts/web-y/madison/$p.txt"
+  done
+}
+ydeb
+AT=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 0 "web-y on Debian: exit 0"
+has "$AT" "kind=pin host=web-y branch=8.4 file=/etc/apt/preferences.d/php2shell-php8.4.pref action=written" \
+  "web-y on Debian: Debian's plain 8.4.11-1 is a distro build, pinned off the PPA"
+has "$(cat "$(y /etc/apt/preferences.d/php2shell-php8.4.pref)" 2>/dev/null)" "Pin: origin packages.sury.org" "web-y on Debian: the pin names sury's site"
+has "$AT" "kind=policy host=web-y branch=8.4 origin=distro package=php8.4-fpm installed=8.4.11-1 before=$SUD84 candidate=8.4.11-1 candidate_origin=distro moved=- pin=/etc/apt/preferences.d/php2shell-php8.4.pref state=kept before_origin=ppa" \
+  "web-y on Debian: sury's 8.4.13 was the candidate before the pin, Debian's after it"
+has "$AT" "kind=policy host=web-y branch=8.3 origin=ppa package=php8.3-fpm installed=$SUD83 before=$SUD83 candidate=$SUD83 candidate_origin=ppa moved=- pin=- state=kept" \
+  "web-y on Debian: sury's 8.3 build is the PPA's, not pinned"
+has "$(cat "$(y $UUC)" 2>/dev/null)" '"deb.sury.org:trixie"' "web-y on Debian: sury's origin accepted"
+
+# The keeper's own file names already hold something it does not recognise: it overwrites them, keeps each old
+# file under /var/lib/php2shell/backup (outside preferences.d and apt.conf.d, which apt reads whole), and the
+# rollback line copies it back.
+yreset
+mkdir -p "$(y /etc/apt/preferences.d)" "$(y /etc/apt/apt.conf.d)"
+OLDPIN='Package: php8.3
+Pin: origin mirror.example.org
+Pin-Priority: -1'
+OLDUU='Unattended-Upgrade::Allowed-Origins { "Example:noble"; };'
+printf '%s\n' "$OLDPIN" >"$(y $PIN83)"
+printf '%s\n' "$OLDUU" >"$(y $UUC)"
+AO=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 0 "web-y over old files: exit 0"
+for f in $PIN83 $UUC; do
+  rb=$(grep -oE "cp /var/lib/php2shell/backup/${f##*/}\.[0-9TZ]+ $f" <<<"$AO" | head -1)
+  [ -n "$rb" ] && ok "web-y over old files: rollback command for $f" || bad "web-y over old files: rollback command for $f" "$AO"
+  bk=$(awk '{print $2}' <<<"$rb")
+  eq "$(cat "$(y "${bk:-/nonexistent}")" 2>/dev/null)" "$([ "$f" = "$PIN83" ] && echo "$OLDPIN" || echo "$OLDUU")" "web-y over old files: backup of $f holds the old content"
+done
+eq "$(ls "$(y /etc/apt/preferences.d)") $(ls "$(y /etc/apt/apt.conf.d)")" "php2shell-php8.3.pref 51php2shell-ppa-origins" \
+  "web-y over old files: no backup left where apt reads"
+has "$(cat "$(y $UUC)")" '"Example:noble"; "LP-PPA-ondrej-php:noble";' "web-y over old files: the old origin kept in the new entry"
+
+# The disk fills while the keeper writes its origin entry: the new content is a little over 1 KiB, the cap is
+# 1 KiB. The entry goes to a temp name apt skips and is moved into place only when whole, so the old entry
+# stays byte for byte and the temp file goes again.
+yreset
+mkdir -p "$(y /etc/apt/apt.conf.d)"
+{ printf 'Unattended-Upgrade::Allowed-Origins {'; for i in $(seq -w 1 40); do printf ' "Example-%s:noble";' "$i"; done; printf ' };\n'; } >"$(y $UUC)"
+cp "$(y $UUC)" "$WORK/uuc.before"
+echo 1 >"$WORK/hosts/web-y/fsize-limit"
+AF=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 1 "web-y disk full while writing the origin entry: exit 1"
+has "$AF" "kind=keeper host=web-y state=stopped reason=origin-write-failed" "web-y disk full while writing the origin entry: keeper record"
+cmp -s "$(y $UUC)" "$WORK/uuc.before" && ok "web-y disk full while writing the origin entry: the old entry byte for byte" \
+  || bad "web-y disk full while writing the origin entry: the old entry byte for byte" "$(cat "$(y $UUC)")"
+eq "$(ls "$(y /etc/apt/apt.conf.d)")" "51php2shell-ppa-origins" "web-y disk full while writing the origin entry: no temp file left"
+# The same for a pin file, through the writer the keeper uses for both.
+PW=$WORK/pinwrite
+mkdir -p "$PW/etc/apt/preferences.d"
+printf '%s\n' "$OLDPIN" >"$PW$PIN83"
+(trap '' XFSZ; ulimit -f 1; P2S_ROOT=$PW p2s_write_file "$PIN83" "$(printf '%2000s' '' | tr ' ' x)") 2>/dev/null; code=$?
+eq "$code" 1 "pin write on a full disk: fails"
+eq "$(cat "$PW$PIN83")" "$OLDPIN" "pin write on a full disk: the old pin unchanged"
+eq "$(ls "$PW/etc/apt/preferences.d")" "php2shell-php8.3.pref" "pin write on a full disk: no temp file left"
+# A temp pin left by a run that was killed mid-write is not a pin: apt skips its name, and so does the keeper.
+yreset
+mkdir -p "$(y /etc/apt/preferences.d)"
+p2s_pin_content 8.3 ppa.launchpadcontent.net >"$(y $PIN83).php2shell-new"
+AK=$(bash "$S/run.sh" autoupdate web-y); code=$?
+has "$AK" "kind=pin host=web-y branch=8.3 file=$PIN83 action=written" "web-y with a leftover temp pin: the pin is written, not taken as present"
+eq "$(ls "$(y /etc/apt/preferences.d)")" "php2shell-php8.3.pref" "web-y with a leftover temp pin: the temp file replaced"
+
+# The connection drops while the dry run judges the new origin entry: like sshd, the ssh stub sends the session
+# SIGHUP and then SIGKILL. The keeper puts the entry back as it was before it goes, so no unchecked entry stays.
+for prev in no old; do
+  yreset
+  if [ "$prev" = old ]; then mkdir -p "$(y /etc/apt/apt.conf.d)"; printf '%s\n' "$OLDUU" >"$(y $UUC)"; fi
+  echo 30 >"$WORK/hosts/web-y/slow-uu"
+  echo 3 >"$WORK/hosts/web-y/drop-after"
+  AH=$(bash "$S/run.sh" autoupdate web-y 2>&1); code=$?
+  eq "$code" 255 "web-y drop during the dry run ($prev entry before): connection lost"
+  has "$AH" "kind=uu_entry host=web-y value=LP-PPA-ondrej-php:noble file=$UUC action=written" \
+    "web-y drop during the dry run ($prev entry before): the entry was written before the drop"
+  has "$AH" "kind=keeper host=web-y state=interrupted" "web-y drop during the dry run ($prev entry before): keeper record"
+  if [ "$prev" = old ]; then
+    eq "$(cat "$(y $UUC)" 2>/dev/null)" "$OLDUU" "web-y drop during the dry run (old entry before): the old entry is back"
+  else
+    [ -e "$(y $UUC)" ] && bad "web-y drop during the dry run (no entry before): the entry is removed again" "$AH" \
+      || ok "web-y drop during the dry run (no entry before): the entry is removed again"
+  fi
+done
+
 # The dry run fails: the origin entry it was asked to accept is taken out again, the pin stays.
 yreset
 : >"$WORK/hosts/web-y/fail-uu"
@@ -1137,6 +1376,46 @@ has "$AD" "kind=keeper host=web-y state=dryrun-failed" "web-y dry run fails: kee
 hasnt "$AD" "rm $UUC" "web-y dry run fails: no rollback line for the removed entry"
 has "$AD" "rm $PIN83" "web-y dry run fails: rollback line for the pin"
 
+# The PPA changed its Release Label since apt cached it: apt-get update refuses the source until someone accepts
+# the change, so the keeper stops before writing anything and prints the accept command, as the patcher does.
+yreset
+mkdir -p "$WORK/hosts/web-y/remote"
+sed 's/^Label: .*/Label: PPA for PHP (new)/' "$(y /var/lib/apt/lists/ppa.launchpadcontent.net_ondrej_php_ubuntu_dists_noble_InRelease)" \
+  >"$WORK/hosts/web-y/remote/https___ppa.launchpadcontent.net_ondrej_php_ubuntu_dists_noble_InRelease"
+apthelper "$WORK/hosts/web-y"
+TL=$(tree web-y)
+: >"$STUB_LOG"
+AL=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 1 "web-y with a changed Release Label: exit 1"
+has "$AL" "apt-get update --allow-releaseinfo-change-label" "web-y with a changed Release Label: accept command printed"
+has "$AL" "remote: Label: PPA for PHP (new)" "web-y with a changed Release Label: the change shown"
+has "$AL" "kind=keeper host=web-y state=stopped reason=release-info-changed fields=Label" "web-y with a changed Release Label: keeper record"
+eq "$(tree web-y)" "$TL" "web-y with a changed Release Label: nothing written"
+eq "$(grep -cE '^apt-get ' "$STUB_LOG")" 0 "web-y with a changed Release Label: the keeper never runs the accept command itself"
+eq "$(find "$TMPDIR" -mindepth 1 | head -3)" "" "web-y with a changed Release Label: no InRelease download left behind"
+
+# With the PPA origin accepted, this unattended-upgrades would take php8.3-fpm (Ubuntu-built) from the PPA: the
+# dry run lists it among the upgrades only once the PPA is allowed, so the entry is taken out again. Ubuntu's
+# own update of php8.3-common is listed before and after and is no reason to stop.
+yreset
+printf '%s\n' 'Ubuntu php8.3-common' 'LP-PPA-ondrej-php php8.3-fpm' 'LP-PPA-ondrej-php php8.4-fpm' >"$WORK/hosts/web-y/uu-upgrades.txt"
+AW=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 1 "web-y dry run takes a distro branch from the PPA: exit 1"
+has "$AW" "kind=uu_dryrun host=web-y result=distro-from-ppa exit=0 origins_allowed=LP-PPA-ondrej-php from_ppa=php8.3-fpm" \
+  "web-y dry run takes a distro branch from the PPA: names the package, not Ubuntu's own update or the PPA branch"
+[ -e "$(y $UUC)" ] && bad "web-y dry run takes a distro branch from the PPA: origin entry removed again" \
+  || ok "web-y dry run takes a distro branch from the PPA: origin entry removed again"
+has "$AW" "kind=uu_entry host=web-y value=LP-PPA-ondrej-php:noble file=$UUC action=removed" "web-y dry run takes a distro branch from the PPA: removal recorded"
+has "$AW" "kind=keeper host=web-y state=dryrun-failed" "web-y dry run takes a distro branch from the PPA: keeper record"
+has "$(bash "$S/report.sh" "$(sed -n 's/^log: //p' <<<"$AW")")" '**would upgrade php8.3-fpm of a distro-built branch from the PPA**' \
+  "report: the dry run's PPA upgrade of a distro branch"
+yreset
+printf '%s\n' 'Ubuntu php8.3-common' 'LP-PPA-ondrej-php php8.4-fpm' >"$WORK/hosts/web-y/uu-upgrades.txt"
+AV=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 0 "web-y dry run upgrades Ubuntu's 8.3 from Ubuntu and the PPA's 8.4 from the PPA: exit 0"
+has "$AV" "kind=uu_dryrun host=web-y result=ok exit=0 origins_allowed=LP-PPA-ondrej-php from_ppa=-" \
+  "web-y dry run with only expected upgrades: ok"
+
 # No cached Release file: the Origin to accept is unknown, so nothing is written.
 yreset
 rm "$(y /var/lib/apt/lists/ppa.launchpadcontent.net_ondrej_php_ubuntu_dists_noble_InRelease)"
@@ -1145,6 +1424,11 @@ AN=$(bash "$S/run.sh" autoupdate web-y); code=$?
 eq "$code" 1 "web-y without a cached Release file: exit 1"
 has "$AN" "Run apt-get update on the host" "web-y without a cached Release file: says what to do"
 eq "$(tree web-y)" "$TN" "web-y without a cached Release file: nothing written"
+
+# An APT::Periodic value with a space still makes one record field.
+yreset
+sed -i 's/^APT::Periodic::Unattended-Upgrade "1";$/APT::Periodic::Unattended-Upgrade "1 d";/' "$WORK/hosts/web-y/apt-config.txt"
+has "$(bash "$S/run.sh" autoupdate web-y)" "kind=keeper host=web-y state=configured periodic=1%20d" "keeper record: periodic value encoded"
 
 # packages.sury.org's Release Origin is deb.sury.org: the audit counts it as the PPA covered, like the ondrej one.
 yreset
@@ -1254,7 +1538,7 @@ has "$R" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.13` | distro | active | unknown | 
 has "$R" '| 7.4 | fpm | `1:7.4.33-31+ubuntu24.04.1+deb.sury.org+1` | ppa | active | unknown | yes | fixed | changelog |' "report: web-a 7.4 row"
 has "$R" '| 8.4 | fpm | `8.4.17-1+ubuntu24.04.1+deb.sury.org+1` | ppa | active | unknown | no | **unfixed** | below-threshold |' "report: unfixed in bold"
 has "$R" "## web-c (debian-12)" "report: web-c section"
-has "$R" "No PHP-FPM or PHP-CGI installed." "report: host without a web SAPI"
+has "$R" "No PHP-FPM, mod_php or PHP-CGI installed." "report: host without a web SAPI"
 has "$R" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.12` | distro | inactive | not-running | no | **unfixed** | below-threshold | `8.3.6-0ubuntu0.24.04.13` |' \
   "report: target column with the target build"
 has "$R" '| below-threshold | none (no-fixed-build-in-cached-lists) |' "report: no target shows its reason"
@@ -1269,7 +1553,7 @@ has "$VR" '- php8.3 Apache: `/etc/apache2/sites-enabled/shop.conf:6` php_admin_f
   "report: Apache override listed as Apache's, with file and line"
 AYR=$(bash "$S/report.sh" "$LOG_AY")
 has "$AYR" "## web-y (ubuntu-24.04)" "report: keeper log has its host section"
-hasnt "$AYR" "No PHP-FPM or PHP-CGI installed." "report: a keeper log is not an empty host"
+hasnt "$AYR" "No PHP-FPM, mod_php or PHP-CGI installed." "report: a keeper log is not an empty host"
 has "$AYR" '| 8.3 | distro | php8.3-fpm | `8.3.6-0ubuntu0.24.04.13` | `8.3.35-1+ubuntu24.04.1+deb.sury.org+1` (ppa) | `8.3.6-0ubuntu0.24.04.13` (distro) | `/etc/apt/preferences.d/php2shell-php8.3.pref` | kept |' \
   "report: keeper row for the pinned distro branch"
 has "$AYR" '| 8.4 | ppa | php8.4-fpm | `8.4.17-1+ubuntu24.04.1+deb.sury.org+1` | `8.4.27-1+ubuntu24.04.1+deb.sury.org+1` (ppa) | `8.4.27-1+ubuntu24.04.1+deb.sury.org+1` (ppa) | - | kept |' \
@@ -1295,7 +1579,7 @@ MR=$(bash "$S/report.sh" "$(grep -l 'kind=mitigation' "$P2S_CACHE"/web-h-ensure-
 has "$MR" '| 8.3 | fpm | absent | written | Off | 1 | **override** |' "report: mitigation row with the override state"
 has "$MR" '- php8.3 pool `www`: `/etc/php/8.3/fpm/pool.d/www.conf:6` php_admin_flag = on - **re-enables it**' "report: override listed with file and line"
 has "$MR" '| 8.3 | cgi | foreign | inspected | On | 0 | **foreign** |' "report: foreign file in the audit"
-hasnt "$MR" "No PHP-FPM or PHP-CGI installed." "report: ensure log without branch rows still has its table"
+hasnt "$MR" "No PHP-FPM, mod_php or PHP-CGI installed." "report: ensure log without branch rows still has its table"
 has "$(bash "$S/report.sh" "$WORK/old.log")" '| fixed | distro-threshold | - |' "report: log from before targets shows -"
 has "$R" '| none (no-fixed-build-in-cached-lists) | **2026-09-30, older than the fixes** |' "report: stale lists flagged next to the missing target"
 has "$R" '| `8.3.6-0ubuntu0.24.04.13` | 2026-10-24 |' "report: fresh lists show their date"

@@ -46,7 +46,7 @@ for target in $(cut -f1 <<<"$newest" | sort -u); do
           [ "$(word apache_overrides "$w")" = - ] || reason+=", Apache override: $(word apache_overrides "$w") (the operator removes it)"
           [ "$(word refused "$w")" = - ] || reason+=", refused: php$(word refused "$w" | sed 's/,/, php/g') would change origin"
           [ "$(word loose_pins "$w")" = - ] || reason+=", pin that does not hold: $(word loose_pins "$w")"
-          [ "$(word keeper "$w")" != dryrun-failed ] || reason+=", unattended-upgrade --dry-run did not accept the PPA origin"
+          [ "$(word keeper "$w")" != dryrun-failed ] || reason+=", the unattended-upgrade --dry-run check failed and the origin entry was taken out again"
           ;;
       esac
     elif [ "$a_status" = unreachable ] || [ "$a_status" = timeout ] || [ "$(word reached "$a")" = no ]; then
