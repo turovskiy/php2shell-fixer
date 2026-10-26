@@ -78,6 +78,8 @@ It does not touch a `99-security.ini` someone else wrote, and it does not edit p
 
 This is a write on the server, so run it yourself or approve it when Claude asks.
 
+`ensure` also leaves an apt hook on the server: after every package install or upgrade, apt runs the same check again, so a PHP version you install next month gets the protection too. The hook lives in two files, `/etc/apt/apt.conf.d/99php2shell-ensure` and `/usr/local/sbin/php2shell-ensure`, and writes what it did to `/var/log/php2shell-ensure.log`. It can never make apt fail. To remove it, delete both files. The audit shows whether the hook is in place and up to date.
+
 ## Tests
 
 ```

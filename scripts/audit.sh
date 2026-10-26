@@ -51,6 +51,10 @@ while read -r mbranch msapi; do
   echo "php$mbranch $msapi: 99-security.ini $owner -> $P2S_MSTATE"
 done <<<"$(p2s_web_sapis)"
 
+hook=$(p2s_hook_state)
+p2s_record kind=ensure_hook host="$host" state="$hook"
+echo "apt hook that keeps the mitigation in place: $hook"
+
 echo "== host facts"
 # Which site runs on which pool: nginx -T is the effective config, so symlinked and included sites count.
 ngx=$(nginx -T </dev/null 2>/dev/null)

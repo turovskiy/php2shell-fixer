@@ -561,6 +561,50 @@ H2=$(bash "$S/run.sh" audit web-h)
 has "$H2" "kind=mitigation host=web-h branch=8.3 sapi=fpm ini=owned action=inspected upload_progress=Off overrides=1 state=override" \
   "audit after ensure: owned file, override still reported"
 
+echo "▸ apt hook"
+HK=$WORK/hosts/web-f/root/usr/local/sbin/php2shell-ensure
+HC=$WORK/hosts/web-f/root/etc/apt/apt.conf.d/99php2shell-ensure
+HL=$WORK/hosts/web-f/root/var/log/php2shell-ensure.log
+[ -x "$HK" ] && ok "ensure installed the hook script, executable" || bad "ensure installed the hook script, executable"
+has "$(cat "$HC" 2>/dev/null)" 'DPkg::Post-Invoke { "if [ -x /usr/local/sbin/php2shell-ensure ]; then timeout 120 /usr/local/sbin/php2shell-ensure || true; fi"; };' \
+  "apt conf calls it after every dpkg run, never failing"
+has "$F" "kind=ensure_hook host=web-f action=installed state=present" "first ensure: hook installed"
+has "$F" "rm /etc/apt/apt.conf.d/99php2shell-ensure /usr/local/sbin/php2shell-ensure" "first ensure: rollback line for the hook"
+has "$F2" "kind=ensure_hook host=web-f action=unchanged state=present" "second ensure: up-to-date hook left alone"
+hasnt "$F2" "rm /etc/apt/apt.conf.d/99php2shell-ensure" "second ensure: no rollback line for an untouched hook"
+
+# A branch apt installs later: the hook alone gives it the ini.
+printf 'ii |php8.2-fpm|8.2.35-1+ubuntu24.04.1+deb.sury.org+1\n' >>"$WORK/hosts/web-f/dpkg-query.txt"
+mkdir -p "$WORK/hosts/web-f/root/etc/php/8.2/fpm/conf.d"
+echo php8.2-fpm >>"$WORK/hosts/web-f/active.txt"
+P2S_STUB=$WORK/hosts/web-f STUB_HOST=web-f "$HK"; code=$?
+eq "$code" 0 "hook run: exit 0"
+eq "$(ini web-f 8.2/fpm)" "$INI" "hook run: the new 8.2 branch got its ini"
+has "$(cat "$HL")" "kind=mitigation host=web-f branch=8.2 sapi=fpm ini=absent action=written upload_progress=Off" "hook run: logged"
+eq "$(ini web-f 8.3/cgi)" "$INI" "hook run: existing SAPIs untouched and still mitigated"
+
+# A hook that fails inside still exits 0, and apt's command line swallows any exit code anyway.
+printf 'ii |php8.1-fpm|8.1.2-1ubuntu2.28\n' >>"$WORK/hosts/web-f/dpkg-query.txt"
+mkdir -p "$WORK/hosts/web-f/root/etc/php/8.1/fpm/conf.d"
+: >"$WORK/hosts/web-f/fail-t-php-fpm8.1"
+P2S_STUB=$WORK/hosts/web-f STUB_HOST=web-f "$HK"; code=$?
+eq "$code" 0 "hook run with a failing config test: still exit 0"
+has "$(cat "$HL")" "ensure finished with exit 1" "hook failure logged"
+eq "$(ini web-f 8.1/fpm)" "" "hook failure: the ini that broke the config test was rolled back"
+printf '#!/bin/sh\nexit 7\n' >"$WORK/bin/failing-hook"; chmod +x "$WORK/bin/failing-hook"
+CMD=$(sed -nE 's/.*Post-Invoke \{ "(.*)"; \};/\1/p' "$HC" | sed "s#/usr/local/sbin/php2shell-ensure#$WORK/bin/failing-hook#g")
+bash -c "$CMD"; code=$?
+eq "$code" 0 "apt's Post-Invoke command exits 0 even when the hook exits 7"
+
+H1=$(bash "$S/run.sh" audit web-f)
+has "$H1" "kind=ensure_hook host=web-f state=present" "audit: hook present"
+has "$A" "kind=ensure_hook host=web-a state=missing" "audit: hook missing"
+echo "# local edit" >>"$HK"
+H2=$(bash "$S/run.sh" audit web-f)
+has "$H2" "kind=ensure_hook host=web-f state=outdated" "audit: changed hook is outdated"
+H3=$(bash "$S/run.sh" ensure web-f)
+has "$H3" "kind=ensure_hook host=web-f action=updated state=present" "ensure: outdated hook rewritten"
+
 echo "▸ fix"
 state() { echo "$WORK/hosts/$1/root/var/lib/php2shell"; }
 : >"$STUB_LOG"
@@ -726,7 +770,8 @@ has "$NX" "stale-ensure: ensure - not mitigated" "next: an ensure older than the
 has "$NX" "never-audited: audit - no audit yet" "next: no audit -> audit"
 has "$NX" "fix-ok: verify - fix finished after the last audit" "next: successful fix -> verify"
 has "$NX" "fix-partial: fix - last fix: exit-3, unfixed: php8.4" "next: fix that left a branch unfixed names it"
-eq "$(wc -l <<<"$NX")" 12 "next: one line per host"
+has "$NX" "hook-missing: ensure - mitigated, but the apt hook that keeps it in place is missing" "next: missing apt hook -> ensure"
+eq "$(wc -l <<<"$NX")" 13 "next: one line per host"
 bash "$S/next.sh" >/dev/null 2>&1; code=$?
 eq "$code" 2 "next: no arguments -> exit 2"
 

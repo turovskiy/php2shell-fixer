@@ -66,3 +66,5 @@ The audit's last section tells the operator how to patch; report these alongside
 | `unknown` | The SAPI binary gave no answer |
 
 `ini=legacy` is a file written by the earlier fix.sh; ensure adopts it unchanged when it already turns upload progress off.
+
+ensure also installs an apt hook (`/etc/apt/apt.conf.d/99php2shell-ensure` calling `/usr/local/sbin/php2shell-ensure`, log `/var/log/php2shell-ensure.log`), so a PHP branch installed later gets the mitigation without anyone rerunning ensure. The audit's `ensure_hook` record says `present`, `missing` or `outdated` (written by another plugin version or edited by hand); the last two send the host back to ensure. The hook never fails apt: its exit code is swallowed and its failures go to the log.
