@@ -24,7 +24,7 @@ rc=0
 for log in "${logs[@]}"; do
   [ -r "$log" ] || { echo "unreadable log: $log" >&2; rc=1; }
 done
-branches=() mitigations=() overrides=() sites=() pools=() holds=() sources=() origins=() facts=()
+branches=() mitigations=() overrides=() sites=() pools=() holds=() sources=() origins=() facts=() patches=() probes=()
 dec() { local v=${1//%20/ }; echo "${v//%25/%}"; }   # values were encoded with p2s_enc
 flush() { # print the current host section
   [ -n "${cur_host:-}" ] || return 0
@@ -46,7 +46,19 @@ flush() { # print the current host section
     echo
     printf '%s\n' "${overrides[@]}"
   fi
-  [ ${#branches[@]} -gt 0 ] || [ ${#mitigations[@]} -gt 0 ] || echo 'No PHP-FPM or PHP-CGI installed.'
+  if [ ${#patches[@]} -gt 0 ]; then
+    [ ${#branches[@]} -eq 0 ] || echo
+    echo '| Branch | Before | After | Target | Fixed | Restart | Modules | Result |'
+    echo '|---|---|---|---|---|---|---|---|'
+    printf '%s\n' "${patches[@]}"
+  fi
+  if [ ${#probes[@]} -gt 0 ]; then
+    echo
+    printf '%s\n' "${probes[@]}"
+  fi
+  # A preflight stop leaves no branch rows, but the host has PHP: say nothing rather than "no PHP".
+  [ ${#branches[@]} -gt 0 ] || [ ${#mitigations[@]} -gt 0 ] || [ ${#patches[@]} -gt 0 ] || [ "$mode_seen" = fix ] \
+    || echo 'No PHP-FPM or PHP-CGI installed.'
   if [ ${#facts[@]} -gt 0 ]; then
     printf '\n### Host facts\n\n'
     printf '%s\n' "${facts[@]}"
@@ -69,14 +81,14 @@ flush() { # print the current host section
   if [ ${#origins[@]} -gt 0 ]; then
     printf '\nunattended-upgrades origins: %s\n' "${origins[*]}"
   fi
-  branches=() mitigations=() overrides=() sites=() pools=() holds=() sources=() origins=() facts=()
+  branches=() mitigations=() overrides=() sites=() pools=() holds=() sources=() origins=() facts=() patches=() probes=()
 }
 
 echo "# PHP2Shell report"
 while IFS=$'\t' read -r _ _ _ log; do
   [ -n "$log" ] || continue
   hosts=0
-  cur_host="" run_mode="" run_started="" run_status="" run_target=""
+  cur_host="" run_mode="" run_started="" run_status="" run_target="" mode_seen=""
   while IFS= read -r line; do
     [[ $line == '@p2s '* ]] || continue
     declare -A r=()
@@ -89,7 +101,7 @@ while IFS=$'\t' read -r _ _ _ log; do
     fi
     case ${r[kind]:-} in
       run)
-        run_target=${r[target]} run_mode=${r[mode]} run_started=${r[started]}
+        run_target=${r[target]} run_mode=${r[mode]} run_started=${r[started]} mode_seen=${r[mode]}
         ;;
       run_end)
         run_status="exit ${r[exit]} (${r[status]})"
@@ -128,6 +140,35 @@ while IFS=$'\t' read -r _ _ _ log; do
         [ "$m" = mitigated ] || m="**$m**"
         mitigations+=("$(printf '| %s | %s | %s | %s | %s | %s | %s |' "${r[branch]}" "${r[sapi]}" "${r[ini]}" \
           "${r[action]}" "${r[upload_progress]}" "${r[overrides]}" "$m")")
+        ;;
+      preflight)
+        if [ "${r[result]}" = failed ]; then
+          f="- **Preflight stopped the patch: ${r[reason]}**"
+          [ -z "${r[packages]:-}" ] || f+=", held: \`${r[packages]}\`"
+          [ -z "${r[fields]:-}" ] || f+=", changed Release fields: ${r[fields]}"
+          facts+=("$f")
+        else
+          facts+=("- Backup before the patch: \`${r[backup]}\`")
+        fi
+        ;;
+      fix)
+        case ${r[state]} in fixed) fs=fixed ;; *) fs="**${r[state]}**" ;; esac
+        tg=${r[target]}
+        [ "$tg" = none ] || [ "$tg" = - ] || tg="\`$tg\`"
+        patches+=("$(printf '| %s | `%s` | `%s` | %s | %s | %s | %s | %s |' "${r[branch]}" "${r[before]}" "${r[after]}" \
+          "$tg" "${r[fixed]}" "${r[restart]}" "${r[modules]}" "$fs")")
+        ;;
+      probe)
+        pr="- \`${r[name]}\`: ${r[before]} -> ${r[after]}"
+        [ "${r[before]}" = "${r[after]}" ] || pr+=" - **changed**"
+        probes+=("$pr")
+        ;;
+      probe_summary)
+        case ${r[state]} in
+          no-sites) probes+=("- HTTP probe: no sites found, nothing compared") ;;
+          changed) probes+=("- HTTP probe: **a status code changed**") ;;
+          *) probes+=("- HTTP probe: every status code unchanged") ;;
+        esac
         ;;
       webserver)
         facts+=("- Web servers: nginx ${r[nginx]}, apache2 ${r[apache2]}")

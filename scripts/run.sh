@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Local runner. Streams a mode's scripts to each host as one bash program over ssh, so nothing is copied
 # to a server, and saves each host's output to its own log that report.sh and next.sh read.
-# Usage: run.sh audit|ensure <host>...   host: an ssh alias or user@address; ensure writes, audit only reads
+# Usage: run.sh audit|ensure|fix <host>... host: an ssh alias or user@address; audit only reads, the others write
 #        run.sh bundle <mode>             print the stream for <mode> (what ssh would receive)
 # Logs:  ${P2S_CACHE:-$XDG_CACHE_HOME/php2shell}/<host>-<mode>-<UTC stamp with ms>.log, opened by a "run"
 #        record and closed by a "run_end" record (exit code; status ok, exit-<n>, unreachable or timeout).
@@ -25,8 +25,9 @@ usage() {
 
 bundle() {
   case $1 in
-    audit) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/mitigation.sh" "$HERE/lib/hostfacts.sh" "$HERE/audit.sh" ;;
+    audit) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/mitigation.sh" "$HERE/lib/hostfacts.sh" "$HERE/lib/branch.sh" "$HERE/audit.sh" ;;
     ensure) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/mitigation.sh" "$HERE/ensure.sh" ;;
+    fix) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/mitigation.sh" "$HERE/lib/hostfacts.sh" "$HERE/lib/branch.sh" "$HERE/fix.sh" ;;
     *) echo "unknown mode: $1" >&2; return 2 ;;
   esac
 }
@@ -64,7 +65,7 @@ case ${1:-} in
     [ $# -eq 2 ] || usage
     bundle "$2"
     ;;
-  audit | ensure)
+  audit | ensure | fix)
     [ $# -ge 2 ] || usage
     mode=$1
     shift

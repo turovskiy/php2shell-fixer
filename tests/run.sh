@@ -86,6 +86,22 @@ for d in "$WORK"/hosts/*/debs/*/; do
   tar -C "$WORK/pkg/$key" -cf "${d%/}.tar" ./usr
 done
 
+# Patcher hosts: web-m as is, and copies of it with one thing going wrong each.
+derive() { # derive <new host> <file> <content>
+  cp -r "$WORK/hosts/web-m" "$WORK/hosts/$1"
+  printf '%s\n' "$3" >"$WORK/hosts/$1/$2"
+}
+derive web-o fail-t-php-fpm8.3 ''                  # config test fails after the change
+derive web-p fail-restart-php8.3-fpm ''            # pool does not come back after its restart
+derive web-q holds.txt php8.3-fpm                  # held package
+derive web-r fail-update-label ''                  # the PPA changed its Release Label
+derive web-t http.txt 'shop.example.com 200 502'   # the site answers differently afterwards
+derive web-s slow-install 3                        # connection drops mid-upgrade; next run reads the result
+echo 1 >"$WORK/hosts/web-s/drop-after"
+derive web-u slow-install 5                        # connection drops; next run attaches to the running unit
+echo 1 >"$WORK/hosts/web-u/drop-after"
+for h in "$WORK"/hosts/*/root; do mkdir -p "$h/root"; done   # /root, where the patcher keeps its backup
+
 # Stubs, first on PATH. ssh runs the streamed program locally against the named host's fake root.
 REAL_DPKG=$(command -v dpkg)
 mkdir -p "$WORK/bin"
@@ -95,17 +111,56 @@ stub() { # stub <name> <body>: a logging stub
   chmod +x "$WORK/bin/$1"
 }
 # ssh [-o opt]... <host> 'bash -s': the host is the second-to-last argument. A host with a "sleep" file
-# waits that many seconds first, to exercise the per-host timeout.
+# waits that many seconds first, to exercise the per-host timeout. A host with a "drop-after" file loses the
+# connection after that many seconds: like sshd on a dropped session, the whole session's process group
+# gets SIGHUP and then SIGKILL, children included (255). Only what left the session survives.
 stub ssh 'h=${@: -2:1}
 d=$P2S_TEST_HOSTS/$h
 [ -d "$d" ] || { echo "ssh: Could not resolve hostname $h: Name or service not known" >&2; exit 255; }
 [ -f "$d/sleep" ] && sleep "$(cat "$d/sleep")"
+if [ -f "$d/drop-after" ]; then
+  P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h setsid bash -s <&0 &
+  pid=$!
+  sleep "$(cat "$d/drop-after")"
+  kill -HUP -- "-$pid" 2>/dev/null; sleep 0.2; kill -9 -- "-$pid" 2>/dev/null
+  echo "Connection to $h closed by remote host." >&2
+  exit 255
+fi
 P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h exec bash -s'
 stub hostname 'echo "$STUB_HOST"'
-stub dpkg-query 'cat "$P2S_STUB/dpkg-query.txt"'
+# dpkg-query -W -f=<format> <package>...: fixture lines are "<status>|<package>|<version>[|<source>]".
+# A ${source:Package} format prints "<status>|<package>|<source>", the source defaulting to php<X.Y> as for
+# the packages built from PHP itself; another format naming the package prints the fixture as is; a
+# ${Version} format prints the versions of the named packages.
+stub dpkg-query 'fmt="" pats=()
+for a; do case $a in -W) ;; -f=*) fmt=${a#-f=} ;; *) pats+=("$a") ;; esac; done
+case $fmt in
+  *source:Package*)
+    awk -F"|" -v OFS="|" "{s = \$4; if (s == \"\") { s = \$2; sub(/^libapache2-mod-/, \"\", s); sub(/-.*/, \"\", s) } print \$1, \$2, s}" "$P2S_STUB/dpkg-query.txt" ;;
+  *binary:Package*) cut -d"|" -f1-3 "$P2S_STUB/dpkg-query.txt" ;;
+  *)
+    for p in "${pats[@]}"; do
+      v=$(awk -F"|" -v p="$p" "\$2 == p {print \$3}" "$P2S_STUB/dpkg-query.txt")
+      [ -n "$v" ] || continue
+      case $fmt in *n) printf "%s\n" "$v" ;; *) printf "%s" "$v" ;; esac
+    done ;;
+esac'
 stub systemctl 'if [ "$1" = is-active ]; then
+  case $2 in
+    php2shell-fix-*)   # a transient patch unit is active while the process systemd-run started lives
+      f=$P2S_STUB/units/$2.pid
+      [ -f "$f" ] && kill -0 "$(cat "$f")" 2>/dev/null && { echo active; exit 0; }
+      echo inactive; exit 3 ;;
+  esac
   grep -qxF "${2%.service}" "$P2S_STUB/active.txt" && { echo active; exit 0; }
   echo inactive; exit 3
+fi
+# restart: fail-restart-<unit> in the fixture leaves the unit down afterwards
+if [ "$1" = restart ]; then
+  u=${2%.service}
+  if [ -e "$P2S_STUB/fail-restart-$u" ]; then sed -i "/^$u\$/d" "$P2S_STUB/active.txt"
+  else grep -qxF "$u" "$P2S_STUB/active.txt" || echo "$u" >>"$P2S_STUB/active.txt"; fi
+  exit 0
 fi
 [ "$1" = reload ] && [ -e "$P2S_STUB/fail-reload" ] && exit 1
 # show -p ActiveEnterTimestamp --value <unit>: start time from started.txt ("<unit> <time>"), empty if absent
@@ -117,12 +172,41 @@ exit 0'
 # "apt-get download pkg=ver" leaves a .deb naming its fixture; a version without a fixture is not found.
 # apt-get and dpkg-deb drain stdin, as a prompting tool would: the audit itself arrives on stdin, so a call
 # without </dev/null swallows the rest of the program (or the remaining branches) and records go missing.
+# "apt-get update" fails on fail-update-label (a PPA changed its Label) or fail-update. "apt-get install
+# pkg=ver..." installs into the fixture: dpkg-query.txt gets the new versions, php*-common brings the
+# candidate changelog, modules-after.txt replaces modules.txt; slow-install and fail-install shape the run.
 stub apt-get 'cat >/dev/null
 if [ "$1" = download ]; then
   key=${!#}
   [ -f "$P2S_STUB/debs/$key.tar" ] || { echo "E: Version ${key#*=} for ${key%%=*} was not found" >&2; exit 100; }
   echo "$key" >"${key%%=*}_${key#*=}_amd64.deb"
-fi'
+  exit 0
+fi
+case " $* " in
+  *" update "*)
+    if [ -e "$P2S_STUB/fail-update-label" ] && [[ " $* " != *" --allow-releaseinfo-change"* ]]; then
+      printf "E: Repository \"https://ppa.launchpadcontent.net/ondrej/php/ubuntu noble InRelease\" changed its \x27Label\x27 value from \"***** The main PPA *****\" to \"PPA for PHP\"\n"
+      echo "N: This must be accepted explicitly before updates for this repository can be applied."
+      exit 100
+    fi
+    [ -e "$P2S_STUB/fail-update" ] && { echo "E: Could not get lock /var/lib/apt/lists/lock"; exit 100; }
+    exit 0 ;;
+  *" install "*)
+    [ -f "$P2S_STUB/slow-install" ] && sleep "$(cat "$P2S_STUB/slow-install")"
+    [ -e "$P2S_STUB/fail-install" ] && { echo "E: Sub-process /usr/bin/dpkg returned an error code (1)"; exit 100; }
+    for a; do
+      case $a in
+        php*=* | libapache2-mod-php*=*)
+          p=${a%%=*} v=${a#*=}
+          awk -F"|" -v OFS="|" -v p="$p" -v v="$v" "\$2 == p {\$3 = v} {print}" "$P2S_STUB/dpkg-query.txt" >"$P2S_STUB/dpkg-query.new"
+          mv "$P2S_STUB/dpkg-query.new" "$P2S_STUB/dpkg-query.txt"
+          mkdir -p "$P2S_ROOT/var/lib/dpkg/info"; touch "$P2S_ROOT/var/lib/dpkg/info/$p.list"
+          case $p in *-common) [ -f "$P2S_STUB/debs/$a.tar" ] && tar -xf "$P2S_STUB/debs/$a.tar" -C "$P2S_ROOT" ;; esac ;;
+      esac
+    done
+    [ -f "$P2S_STUB/modules-after.txt" ] && cp "$P2S_STUB/modules-after.txt" "$P2S_STUB/modules.txt"
+    exit 0 ;;
+esac'
 stub dpkg-deb 'cat >/dev/null
 [ "$1" = --fsys-tarfile ] && exec cat "$P2S_STUB/debs/$(cat "$2").tar"'
 stub apt 'exit 0'
@@ -139,6 +223,23 @@ for f in "$P2S_ROOT/etc/nginx/nginx.conf" "$P2S_ROOT"/etc/nginx/sites-enabled/*;
   echo "# configuration file ${f#"$P2S_ROOT"}:"; cat "$f"; echo
 done'
 stub id 'echo "${STUB_UID:-0}"'
+# systemd-run --unit=<name> [--options] <command>: starts the command in its own session, as systemd would
+# outside the ssh session, and keeps its pid for "systemctl is-active <name>".
+stub systemd-run 'unit=""
+while [ $# -gt 0 ]; do case $1 in --unit=*) unit=${1#--unit=} ;; --*) ;; *) break ;; esac; shift; done
+mkdir -p "$P2S_STUB/units"
+setsid "$@" </dev/null >/dev/null 2>&1 &
+echo $! >"$P2S_STUB/units/$unit.pid"'
+# curl ... https://<name>/: http.txt holds "<name> <code before> <code after>"; the first call per name
+# answers the first code, later calls the second. A name not listed answers 000, as curl does on no reply.
+stub curl 'n=${!#}; n=${n#https://}; n=${n%/}
+line=$(grep "^$n " "$P2S_STUB/http.txt" 2>/dev/null)
+[ -n "$line" ] || { printf 000; exit 7; }
+if [ -e "$P2S_STUB/.curl-$n" ]; then awk "{printf \"%s\", \$3}" <<<"$line"
+else : >"$P2S_STUB/.curl-$n"; awk "{printf \"%s\", \$2}" <<<"$line"; fi'
+stub journalctl 'u=${2%.service}
+echo "systemd[1]: $u.service: Main process exited, code=exited, status=78/CONFIG"
+echo "systemd[1]: Failed to start $u.service - The PHP FastCGI Process Manager."'
 # SAPI binaries: the effective upload_progress comes from the fake root's ini files, last assignment wins
 # (php.ini, then conf.d in order). A host without /etc/php/<X.Y>/<sapi> behaves as if the binary failed.
 # fail-t-<binary> in the host fixture makes the config test fail (FPM: exit 78; CGI: an ini error on stderr).
@@ -149,6 +250,8 @@ case $1 in
   -t)
     [ -e "$P2S_STUB/fail-t-$n" ] && { echo "ERROR: failed to load configuration file $d/conf.d/99-security.ini" >&2; exit 78; }
     echo "NOTICE: configuration file $d/../php-fpm.conf test is successful" >&2 ;;
+  -m)
+    if [ -f "$P2S_STUB/modules.txt" ]; then cat "$P2S_STUB/modules.txt"; else printf "[PHP Modules]\nCore\nopcache\nsession\n"; fi ;;
   -v)
     [ -e "$P2S_STUB/fail-t-$n" ] && echo "PHP:  syntax error, unexpected \"=\" in $d/conf.d/99-security.ini on line 3" >&2
     echo "PHP $b.0 (cgi-fcgi)" ;;
@@ -164,7 +267,7 @@ case $1 in
     if [ "$s" = fpm ]; then echo "session.upload_progress.enabled => $v => $v"
     else echo "<tr><td class=\"e\">session.upload_progress.enabled</td><td class=\"v\">$v</td><td class=\"v\">$v</td></tr>"; fi ;;
 esac'
-for b in 7.4 8.1 8.2 8.3 8.4; do stub "php-fpm$b" "$SAPI_STUB"; stub "php-cgi$b" "$SAPI_STUB"; done
+for b in 7.4 8.1 8.2 8.3 8.4 8.5; do stub "php-fpm$b" "$SAPI_STUB"; stub "php-cgi$b" "$SAPI_STUB"; done
 export PATH="$WORK/bin:$PATH"
 # The audit's temp dir on the "host": must be empty again after every run.
 export TMPDIR=$WORK/hosttmp
@@ -458,6 +561,104 @@ H2=$(bash "$S/run.sh" audit web-h)
 has "$H2" "kind=mitigation host=web-h branch=8.3 sapi=fpm ini=owned action=inspected upload_progress=Off overrides=1 state=override" \
   "audit after ensure: owned file, override still reported"
 
+echo "▸ fix"
+state() { echo "$WORK/hosts/$1/root/var/lib/php2shell"; }
+: >"$STUB_LOG"
+M=$(bash "$S/run.sh" fix web-m); code=$?
+eq "$code" 0 "web-m: fixed path, exit 0"
+has "$M" "patch started as unit php2shell-fix-" "web-m: the patch runs in a transient unit"
+INSTALL=$(grep -E '^apt-get .* install ' "$STUB_LOG")
+for p in php8.3-cli php8.3-common php8.3-fpm php8.3-opcache; do
+  has "$INSTALL" "$p=8.3.6-0ubuntu0.24.04.13" "web-m: $p pinned to the target"
+done
+has "$INSTALL" "--allow-downgrades" "web-m: install may move to the pinned version in either direction"
+hasnt "$INSTALL" "php8.3-redis" "web-m: PECL extension from its own source is not pinned to the PHP version"
+has "$(cat "$WORK/hosts/web-m/dpkg-query.txt")" "ii |php8.3-redis|6.0.2-1+ubuntu24.04.1+deb.sury.org+1|php-redis" "web-m: php8.3-redis keeps its own version"
+hasnt "$INSTALL" "php8.5" "web-m: fixed 8.5 not reinstalled"
+has "$M" "kind=fix host=web-m branch=8.3 before=8.3.6-0ubuntu0.24.04.12 after=8.3.6-0ubuntu0.24.04.13 target=8.3.6-0ubuntu0.24.04.13 fixed=yes restart=done modules=same state=fixed" \
+  "web-m: 8.3 installed, fixed, restarted"
+has "$M" "kind=fix host=web-m branch=8.5 before=8.5.12-1+ubuntu24.04.1+deb.sury.org+1 after=8.5.12-1+ubuntu24.04.1+deb.sury.org+1 target=none fixed=yes" \
+  "web-m: 8.5 already fixed, nothing installed"
+has "$(grep '^systemctl restart' "$STUB_LOG")" "systemctl restart php8.3-fpm" "web-m: 8.3 pool restarted"
+hasnt "$(cat "$STUB_LOG")" "systemctl reload php8.3-fpm" "web-m: ensure leaves the reload to the restart"
+has "$M" "kind=mitigation host=web-m branch=8.3 sapi=fpm ini=absent action=written upload_progress=Off overrides=0 state=mitigated" "web-m: ensure ran for 8.3"
+eq "$(ls "$WORK/hosts/web-m/root/etc/php/8.5/fpm/conf.d/99-php2shell-backtraces.ini" 2>/dev/null)" "" "web-m: 8.5 fixed -> no backtraces ini"
+has "$M" "kind=probe host=web-m name=shop.example.com before=200 after=200" "web-m: site probed before and after"
+has "$M" "kind=probe_summary host=web-m state=unchanged" "web-m: HTTP unchanged"
+eq "$(ls "$WORK/hosts/web-m/root/root/"etc-php-*.tgz 2>/dev/null | wc -l)" 1 "web-m: /etc/php backed up"
+has "$M" "tar xzf /root/etc-php-" "web-m: rollback: restore the backup"
+has "$M" "apt-get install --allow-downgrades php8.3-cli=8.3.6-0ubuntu0.24.04.12 php8.3-common=8.3.6-0ubuntu0.24.04.12" "web-m: rollback: back to the old build"
+has "$M" "rm /etc/php/8.3/fpm/conf.d/99-security.ini && systemctl reload php8.3-fpm" "web-m: rollback: the ini"
+has "$M" "kind=run_end target=web-m mode=fix exit=0 status=ok" "web-m: runner closes the log"
+
+N=$(bash "$S/run.sh" fix web-n); code=$?
+eq "$code" 3 "web-n: no fixed build offered -> exit 3"
+hasnt "$(grep -E '^apt-get .* install ' "$STUB_LOG")" "php8.4" "web-n: nothing installed for 8.4"
+has "$N" "kind=fix host=web-n branch=8.4 before=8.4.17-1+ubuntu24.04.1+deb.sury.org+1 after=8.4.17-1+ubuntu24.04.1+deb.sury.org+1 target=none fixed=no restart=done modules=same state=unfixed-mitigated" \
+  "web-n: 8.4 unfixed but mitigated, pool restarted for the new ini"
+has "$N" "kind=mitigation host=web-n branch=8.4 sapi=fpm ini=absent action=written upload_progress=Off" "web-n: mitigation applied"
+has "$(cat "$WORK/hosts/web-n/root/etc/php/8.5/fpm/conf.d/99-php2shell-backtraces.ini" 2>/dev/null)" "fatal_error_backtraces = 0" "web-n: 8.5 unfixed -> backtraces off"
+has "$N" "kind=probe_summary host=web-n state=no-sites" "web-n: no sites -> its own state, not unchanged"
+has "$N" "no sites found" "web-n: says so"
+
+O=$(bash "$S/run.sh" fix web-o); code=$?
+eq "$code" 1 "web-o: config test fails -> exit 1"
+eq "$(ls "$WORK/hosts/web-o/root/etc/php/8.3/fpm/conf.d/99-security.ini" 2>/dev/null)" "" "web-o: new ini removed"
+has "$O" "branch=8.3 sapi=fpm ini=absent action=test-failed" "web-o: ensure reports the failed test"
+has "$O" "restart=skipped modules=same state=test-failed" "web-o: pool not restarted"
+
+P=$(bash "$S/run.sh" fix web-p); code=$?
+eq "$code" 1 "web-p: pool down after restart -> exit 1"
+has "$P" "php8.3-fpm is DOWN after its restart" "web-p: says so"
+has "$P" "Main process exited, code=exited, status=78/CONFIG" "web-p: journal excerpt"
+has "$P" "restart=failed modules=same state=pool-down" "web-p: recorded"
+
+Q=$(bash "$S/run.sh" fix web-q); code=$?
+eq "$code" 1 "web-q: held package -> exit 1"
+has "$Q" "STOP: held PHP packages: php8.3-fpm" "web-q: names the held package"
+has "$Q" "kind=preflight host=web-q result=failed reason=held packages=php8.3-fpm" "web-q: preflight record"
+hasnt "$Q" "kind=fix " "web-q: stops before any branch"
+
+Rr=$(bash "$S/run.sh" fix web-r); code=$?
+eq "$code" 1 "web-r: changed Release Label -> exit 1"
+has "$Rr" "apt-get update --allow-releaseinfo-change-label" "web-r: accept command printed"
+has "$Rr" "kind=preflight host=web-r result=failed reason=release-info-changed fields=Label" "web-r: preflight record"
+hasnt "$Rr" "kind=fix " "web-r: never accepted on its own, nothing installed"
+
+Tt=$(bash "$S/run.sh" fix web-t); code=$?
+eq "$code" 3 "web-t: HTTP status changed -> exit 3"
+has "$Tt" "shop.example.com: 200 -> 502" "web-t: names the site"
+has "$Tt" "kind=probe_summary host=web-t state=changed" "web-t: recorded"
+
+S1=$(bash "$S/run.sh" fix web-s 2>&1); code=$?
+eq "$code" 255 "web-s: connection dropped mid-upgrade"
+for i in $(seq 1 60); do ls "$(state web-s)"/*.exit >/dev/null 2>&1 && break; sleep 0.25; done
+eq "$(cat "$(state web-s)"/*.exit 2>/dev/null)" 0 "web-s: the unit ran to its end after the drop"
+rm "$WORK/hosts/web-s/drop-after"
+S2=$(bash "$S/run.sh" fix web-s); code=$?
+eq "$code" 0 "web-s: next run hands back the finished run's exit code"
+has "$S2" "finished while nobody was watching; its log follows. No new patch was started." "web-s: reads the finished log"
+has "$S2" "state=fixed" "web-s: the log shows the fix"
+eq "$(ls "$WORK/hosts/web-s/units/" | wc -l)" 1 "web-s: one patch unit only"
+
+U1=$(bash "$S/run.sh" fix web-u 2>&1); code=$?
+eq "$code" 255 "web-u: connection dropped mid-upgrade"
+rm "$WORK/hosts/web-u/drop-after"
+U2=$(bash "$S/run.sh" fix web-u); code=$?
+has "$U2" "attaching to run" "web-u: next run attaches to the running unit"
+eq "$code" 0 "web-u: and follows it to its exit code"
+eq "$(ls "$WORK/hosts/web-u/units/" | wc -l)" 1 "web-u: no second patch while one runs"
+U3=$(bash "$S/run.sh" fix web-u); code=$?
+has "$U3" "patch started as unit" "web-u: a run reported once lets the next call start a new patch"
+
+PR=$(bash "$S/report.sh" "$(ls "$P2S_CACHE"/web-m-fix-*.log)" "$(ls "$P2S_CACHE"/web-q-fix-*.log)" "$(ls "$P2S_CACHE"/web-t-fix-*.log)")
+has "$PR" '| 8.3 | `8.3.6-0ubuntu0.24.04.12` | `8.3.6-0ubuntu0.24.04.13` | `8.3.6-0ubuntu0.24.04.13` | yes | done | same | fixed |' "report: patch row"
+has "$PR" "- Backup before the patch: \`/root/etc-php-" "report: backup named"
+has "$PR" "- HTTP probe: every status code unchanged" "report: probe unchanged"
+has "$PR" '- **Preflight stopped the patch: held**, held: `php8.3-fpm`' "report: preflight stop"
+has "$PR" '- `shop.example.com`: 200 -> 502 - **changed**' "report: changed site"
+hasnt "$PR" "No PHP-FPM or PHP-CGI installed." "report: a fix log is not an empty host"
+
 echo "▸ runner"
 has "$(bash "$S/run.sh" bundle audit | head -3)" "Fixed-build thresholds" "bundle starts with the version data"
 bash "$S/run.sh" bundle nope >/dev/null 2>&1; code=$?
@@ -522,7 +723,9 @@ has "$NX" "blocked: ensure - last ensure: exit-3, not mitigated: 8.3/fpm:overrid
   "next: failed ensure names the blocker"
 has "$NX" "stale-ensure: ensure - not mitigated" "next: an ensure older than the audit does not count"
 has "$NX" "never-audited: audit - no audit yet" "next: no audit -> audit"
-eq "$(wc -l <<<"$NX")" 10 "next: one line per host"
+has "$NX" "fix-ok: verify - fix finished after the last audit" "next: successful fix -> verify"
+has "$NX" "fix-partial: fix - last fix: exit-3, unfixed: php8.4" "next: fix that left a branch unfixed names it"
+eq "$(wc -l <<<"$NX")" 12 "next: one line per host"
 bash "$S/next.sh" >/dev/null 2>&1; code=$?
 eq "$code" 2 "next: no arguments -> exit 2"
 

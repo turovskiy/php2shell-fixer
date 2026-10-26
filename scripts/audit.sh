@@ -1,5 +1,6 @@
 # Read-only PHP2Shell audit of one host. Changes nothing.
-# Runs as the tail of the bundle from run.sh (after versions.sh, p2s.sh, mitigation.sh, hostfacts.sh):
+# Runs as the tail of the bundle from run.sh (after versions.sh, p2s.sh, mitigation.sh, hostfacts.sh,
+# branch.sh):
 # run.sh audit <host>
 # Output: a human-readable section plus "@p2s" records (schema in p2s.sh): one "branch" record per PHP-FPM
 # branch with its verdict and target, one "candidate" record per build apt offers for it, and one
@@ -23,113 +24,23 @@ pkgs=$(dpkg-query -W -f='${db:Status-Abbrev}|${binary:Package}|${Version}\n' 'ph
 P2S_TMP=$(mktemp -d)
 trap 'rm -rf "$P2S_TMP"' EXIT
 
-# Does the build apt would install name both CVEs? $1 package, $2 version.
-# Prints yes | no | missing (no changelog in the .deb) | download-failed. Installs nothing.
-# Every command here reads /dev/null: this program itself arrives on stdin (ssh host 'bash -s').
-candidate_cve() {
-  local d log="" deb=""
-  d=$(mktemp -d "$P2S_TMP/deb.XXXXXX") || { echo download-failed; return; }
-  if ! (cd "$d" && apt-get download -q "$1=$2" </dev/null >/dev/null 2>&1); then
-    echo download-failed
-  else
-    for deb in "$d"/*.deb; do
-      [ -f "$deb" ] || continue
-      log=$(dpkg-deb --fsys-tarfile "$deb" </dev/null 2>/dev/null \
-        | tar -xO --wildcards './usr/share/doc/*/changelog.Debian.gz' 2>/dev/null | zcat 2>/dev/null)
-    done
-    if [ -z "${deb:-}" ] || [ ! -f "$deb" ]; then echo download-failed
-    elif [ -z "$log" ]; then echo missing
-    elif p2s_changelog_has_cves "$log"; then echo yes
-    else echo no
-    fi
-  fi
-  rm -rf "$d"
-}
-
-# Did FPM restart after the branch's packages were last installed? A running pool keeps the build it
-# started with. Prints "<started> <installed> <ok|needed|not-running|unknown>", times as UTC ISO.
-# Install time is the newest dpkg file list of the branch (php8.3-*.list), so an extension upgrade counts.
-restart_state() { # $1 branch, $2 service state from is-active
-  local started s_epoch="" f t i_epoch=""
-  started=$(systemctl show -p ActiveEnterTimestamp --value "php$1-fpm" </dev/null 2>/dev/null)
-  # date -d "" means today 00:00, so an empty or n/a start time must not reach it.
-  case $started in '' | n/a) ;; *) s_epoch=$(date -u -d "$started" +%s 2>/dev/null) ;; esac
-  for f in "$(p2s_path /var/lib/dpkg/info)/php$1-"*.list; do
-    [ -f "$f" ] || continue
-    t=$(stat -c %Y "$f")
-    if [ -z "$i_epoch" ] || [ "$t" -gt "$i_epoch" ]; then i_epoch=$t; fi
-  done
-  local state
-  if [ "$2" != active ]; then state=not-running
-  elif [ -z "$s_epoch" ] || [ -z "$i_epoch" ]; then state=unknown
-  elif [ "$s_epoch" -ge "$i_epoch" ]; then state=ok
-  else state=needed
-  fi
-  echo "$(if [ "$2" = active ]; then p2s_iso "$s_epoch"; else echo -; fi) $(p2s_iso "$i_epoch") $state"
-}
-
-# When the apt lists of one origin last changed: the newest Packages list of that origin, as UTC ISO time,
-# or "unknown". The audit never runs apt-get update, so candidates are only as fresh as these lists.
-lists_date() {
-  local f t newest=""
-  for f in "$(p2s_path /var/lib/apt/lists)"/*_Packages*; do
-    [ -f "$f" ] && [ "$(p2s_list_origin "$f")" = "$1" ] || continue
-    t=$(stat -c %Y "$f")
-    if [ -z "$newest" ] || [ "$t" -gt "$newest" ]; then newest=$t; fi
-  done
-  p2s_iso "$newest"
-}
-
 while IFS='|' read -r pkg ver; do
   [ -n "$pkg" ] || continue
   branch=${pkg#php}
   branch=${branch%-fpm}
-  origin=$(p2s_origin "$ver")
-  changelog=$(p2s_path "/usr/share/doc/php$branch-common/changelog.Debian.gz")
-  if [ ! -f "$changelog" ]; then
-    cve=missing
-  elif p2s_changelog_has_cves "$(zcat "$changelog" 2>/dev/null)"; then
-    cve=yes
-  else
-    cve=no
-  fi
   active=$(systemctl is-active "php$branch-fpm" </dev/null 2>/dev/null)
-  read -r verdict reason <<<"$(p2s_verdict "$branch" "$ver" "$origin" "$cve")"
+  p2s_branch_eval "$host" "$branch" "$ver"
+  read -r started installed_at restart <<<"$(p2s_restart_state "$branch" "$active")"
 
-  # Every build apt offers for the branch. Only an unfixed branch gets its candidates judged, and only
-  # those of its own origin that are newer than the installed build: the rest cannot become the target.
-  offered=$(apt-cache madison "php$branch-fpm" </dev/null 2>/dev/null | awk -F'|' '{gsub(/ /, "", $2)} $2 != "" && !seen[$2]++ {print $2}')
-  cands=()
-  crecords=()
-  chuman=()
-  while IFS= read -r cv; do
-    [ -n "$cv" ] || continue
-    co=$(p2s_origin "$cv")
-    if [ "$verdict" = unfixed ] && [ "$co" = "$origin" ] && dpkg --compare-versions "$cv" gt "$ver"; then
-      ccve=$(candidate_cve "php$branch-common" "$cv")
-      read -r cverdict creason <<<"$(p2s_verdict "$branch" "$cv" "$co" "$ccve")"
-    else
-      ccve=not-checked cverdict=- creason=not-assessed
-    fi
-    cands+=("$cv|$co|$cverdict")
-    chuman+=("  offered $cv ($co): CVEs in changelog: $ccve -> $cverdict ($creason)")
-    crecords+=("$(p2s_record kind=candidate host="$host" branch="$branch" version="$cv" origin="$co" \
-      cve_changelog="$ccve" verdict="$cverdict" reason="$creason")")
-  done <<<"$offered"
-  read -r target treason <<<"$(p2s_target "$ver" "$origin" "$verdict" "${cands[@]}")"
-  lists=$(lists_date "$origin")
-  read -r started installed_at restart <<<"$(restart_state "$branch" "$active")"
-  stale=$(p2s_lists_stale "$lists")
-
-  echo "php$branch fpm: $ver ($origin, $active), CVEs in changelog: $cve -> $verdict ($reason), target $target ($treason)"
+  echo "php$branch fpm: $ver ($BR_ORIGIN, $active), CVEs in changelog: $BR_CVE -> $BR_VERDICT ($BR_REASON), target $BR_TARGET ($BR_TREASON)"
   echo "  started $started, packages installed $installed_at: restart $restart"
-  echo "  $origin apt lists last changed: $lists (older than the fixes: $stale)"
-  [ ${#chuman[@]} -eq 0 ] || printf '%s\n' "${chuman[@]}"
-  p2s_record kind=branch host="$host" branch="$branch" sapi=fpm installed="$ver" origin="$origin" \
-    active="${active:-unknown}" cve_changelog="$cve" verdict="$verdict" reason="$reason" \
-    target="$target" target_reason="$treason" lists_updated="$lists" lists_stale="$stale" \
+  echo "  $BR_ORIGIN apt lists last changed: $BR_LISTS (older than the fixes: $BR_STALE)"
+  [ ${#BR_CHUMAN[@]} -eq 0 ] || printf '%s\n' "${BR_CHUMAN[@]}"
+  p2s_record kind=branch host="$host" branch="$branch" sapi=fpm installed="$ver" origin="$BR_ORIGIN" \
+    active="${active:-unknown}" cve_changelog="$BR_CVE" verdict="$BR_VERDICT" reason="$BR_REASON" \
+    target="$BR_TARGET" target_reason="$BR_TREASON" lists_updated="$BR_LISTS" lists_stale="$BR_STALE" \
     started="$started" installed_at="$installed_at" restart="$restart"
-  [ ${#crecords[@]} -eq 0 ] || printf '%s\n' "${crecords[@]}"
+  [ ${#BR_CRECORDS[@]} -eq 0 ] || printf '%s\n' "${BR_CRECORDS[@]}"
 done <<<"$pkgs"
 
 echo "== upload_progress mitigation (CVE-2026-115560)"

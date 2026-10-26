@@ -1,0 +1,4 @@
+@p2s schema=1 kind=run target=fix-partial mode=fix started=20261026T100000.000Z
+@p2s schema=1 kind=host host=fix-partial os=ubuntu-24.04
+@p2s schema=1 kind=fix host=fix-partial branch=8.4 before=a after=a target=none fixed=no restart=done modules=same state=unfixed-mitigated
+@p2s schema=1 kind=run_end target=fix-partial mode=fix exit=3 status=exit-3

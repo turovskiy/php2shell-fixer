@@ -1,0 +1,4 @@
+@p2s schema=1 kind=run target=fix-partial mode=audit started=20261026T090000.000Z
+@p2s schema=1 kind=host host=fix-partial os=ubuntu-24.04
+@p2s schema=1 kind=branch host=fix-partial branch=8.4 sapi=fpm verdict=unfixed restart=ok
+@p2s schema=1 kind=run_end target=fix-partial mode=audit exit=0 status=ok

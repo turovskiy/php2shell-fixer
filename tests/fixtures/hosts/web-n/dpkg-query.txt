@@ -1,0 +1,4 @@
+ii |php8.4-fpm|8.4.17-1+ubuntu24.04.1+deb.sury.org+1
+ii |php8.4-common|8.4.17-1+ubuntu24.04.1+deb.sury.org+1
+ii |php8.5-fpm|8.5.10-1+ubuntu24.04.1+deb.sury.org+1
+ii |php8.5-common|8.5.10-1+ubuntu24.04.1+deb.sury.org+1
