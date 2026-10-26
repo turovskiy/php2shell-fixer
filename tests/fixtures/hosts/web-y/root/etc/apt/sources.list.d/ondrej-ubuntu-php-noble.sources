@@ -1,0 +1,9 @@
+Types: deb
+URIs: https://ppa.launchpadcontent.net/ondrej/php/ubuntu/
+Suites: noble
+Components: main
+Signed-By:
+ -----BEGIN PGP PUBLIC KEY BLOCK-----
+ .
+ mQINBGYo...
+ -----END PGP PUBLIC KEY BLOCK-----

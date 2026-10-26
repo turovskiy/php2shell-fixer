@@ -146,7 +146,7 @@ cfg=$(apt-config dump </dev/null 2>/dev/null)
 periodic=$(sed -nE 's/^APT::Periodic::Unattended-Upgrade "([^"]*)";$/\1/p' <<<"$cfg" | tail -1)
 origins=$(sed -nE 's/^Unattended-Upgrade::(Allowed-Origins|Origins-Pattern):: "([^"]*)";$/\2/p' <<<"$cfg")
 covered=no
-grep -qiE 'ondrej' <<<"$origins" && covered=yes
+grep -qiE 'ondrej|sury' <<<"$origins" && covered=yes
 p2s_record kind=autoupdate host="$host" periodic="${periodic:-unset}" origins="$(grep -c . <<<"$origins")" ppa_covered="$covered"
 while IFS= read -r o; do
   [ -n "$o" ] && p2s_record kind=uu_origin host="$host" value="$(p2s_enc "$o")"

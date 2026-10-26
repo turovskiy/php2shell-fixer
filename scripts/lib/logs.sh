@@ -11,7 +11,7 @@ p2s_log_meta() { # $1 log
     return
   fi
   b=$(basename "$1" .log)
-  if [[ $b =~ ^(.+)-(audit|ensure|fix)-([0-9]{8}T[0-9.]+Z)(-[0-9]+)?$ ]]; then
+  if [[ $b =~ ^(.+)-(audit|ensure|fix|autoupdate)-([0-9]{8}T[0-9.]+Z)(-[0-9]+)?$ ]]; then
     printf '%s\t%s\t%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
   else
     printf '%s\tunknown\t0\n' "$b"
@@ -23,7 +23,7 @@ p2s_log_meta() { # $1 log
 p2s_cache_logs() { # $1 dir
   local f
   for f in "$1"/*.log; do
-    [[ ${f##*/} =~ -(audit|ensure|fix)-[0-9]{8}T[0-9.]+Z(-[0-9]+)?\.log$ ]] && echo "$f"
+    [[ ${f##*/} =~ -(audit|ensure|fix|autoupdate)-[0-9]{8}T[0-9.]+Z(-[0-9]+)?\.log$ ]] && echo "$f"
   done
 }
 
@@ -41,8 +41,10 @@ p2s_newest_logs() { # $@ logs
 # status (ok | exit-<n> | unreachable | timeout | none for a log without run_end), exit, reached (a host
 # record exists), unfixed and restart_needed (branches; a SAPI other than FPM is named, 8.3/apache2),
 # unmitigated (branch/sapi:state), overrides (file:line of pool overrides that re-enable upload progress),
-# apache_overrides (the same for Apache config), hook (the apt hook's state: present, missing, outdated).
-# "-" stands for none.
+# apache_overrides (the same for Apache config), hook (the apt hook's state: present, missing, outdated),
+# ppa (yes when the log names an ondrej/sury PPA source), ppa_covered (the audit's unattended-upgrades check),
+# keeper (the auto-update keeper's end state), refused (branches the keeper refused), loose_pins (pins that did
+# not hold a branch). "-" stands for none.
 p2s_log_summary() { # $1 log
   awk '
     function add(v, x) { return v == "" ? x : (index("," v ",", "," x ",") ? v : v "," x) }
@@ -63,11 +65,17 @@ p2s_log_summary() { # $1 log
         else ov = add(ov, r["file"] ":" r["line"])
       }
       else if (r["kind"] == "ensure_hook") hook = r["state"]
+      else if (r["kind"] == "source" || r["kind"] == "ppa") ppa = "yes"
+      else if (r["kind"] == "autoupdate") cov = r["ppa_covered"]
+      else if (r["kind"] == "keeper") { keeper = r["state"]; if (r["branches"] != "") ref = r["branches"] }
+      else if (r["kind"] == "policy" && r["state"] == "pin-ineffective") lp = add(lp, r["pin"])
     }
     END {
-      printf "status=%s exit=%s reached=%s unfixed=%s restart_needed=%s unmitigated=%s overrides=%s apache_overrides=%s hook=%s\n",
+      printf "status=%s exit=%s reached=%s unfixed=%s restart_needed=%s unmitigated=%s overrides=%s apache_overrides=%s hook=%s",
         (status == "" ? "none" : status), (ex == "" ? "-" : ex), (reached == "" ? "no" : reached),
         (unf == "" ? "-" : unf), (rn == "" ? "-" : rn), (um == "" ? "-" : um), (ov == "" ? "-" : ov),
         (aov == "" ? "-" : aov), (hook == "" ? "-" : hook)
+      printf " ppa=%s ppa_covered=%s keeper=%s refused=%s loose_pins=%s\n", (ppa == "" ? "no" : ppa),
+        (cov == "" ? "-" : cov), (keeper == "" ? "-" : keeper), (ref == "" ? "-" : ref), (lp == "" ? "-" : lp)
     }' "$1"
 }
