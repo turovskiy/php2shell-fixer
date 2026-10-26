@@ -74,30 +74,21 @@ p2s_php_packages() {
 
 # A package's state in apt-cache policy now: "<installed> <candidate> <ppa> <installed origin> <candidate
 # origin> <held>", ppa being yes when a PPA source offers any build of it, "(none)" for no installed build or
-# no candidate. A build's origin is that of the first source listed under it (p2s_url_origin), from its
-# version string (p2s_origin) when no source there says ppa or distro, as for a build only in
-# /var/lib/dpkg/status. held: yes when every PPA build has a negative priority on its version line (where
-# apt shows a package pin; the source lines keep the source's own), no when one does not, - without PPA builds.
+# no candidate. A build's origin is p2s_build_origin's. held: yes when every PPA build has a negative priority
+# on its version line (where apt shows a package pin; the source lines keep the source's own), no when one
+# does not, - without PPA builds.
 p2s_policy_state() { # $1 package
-  local out inst cand ppa=no held=- io="" co="" v pr uri dist o
+  local out inst cand ppa=no held=- pr uri dist
   out=$(apt-cache policy "$1" </dev/null 2>/dev/null)
   inst=$(sed -nE 's/^  Installed: (.*)$/\1/p' <<<"$out" | head -1)
   cand=$(sed -nE 's/^  Candidate: (.*)$/\1/p' <<<"$out" | head -1)
   inst=${inst:-(none)} cand=${cand:-(none)}
-  # Version lines (" *** <version> <priority>" for the installed one) each followed by their source lines.
-  while IFS='|' read -r v pr uri dist; do
-    [ -n "$uri" ] || continue
-    o=$(p2s_url_origin "$uri" "$dist")
-    if [ "$o" = ppa ]; then
-      ppa=yes
-      if [ "$pr" -lt 0 ]; then [ "$held" = no ] || held=yes; else held=no; fi
-    fi
-    [ "$o" != other ] || continue
-    [ "$v" = "$inst" ] && [ -z "$io" ] && io=$o
-    [ "$v" = "$cand" ] && [ -z "$co" ] && co=$o
-  done < <(awk '/^ \*\*\* [^ ]+ -?[0-9]+$|^     [^ ]+ -?[0-9]+$/ { v = $(NF - 1); pr = $NF; next }
-    v != "" && /^ +-?[0-9]+ [a-z+]+:\/\// { print v "|" pr "|" $2 "|" $3 }' <<<"$out")
-  echo "$inst $cand $ppa ${io:-$(p2s_origin "$inst")} ${co:-$(p2s_origin "$cand")} $held"
+  while IFS='|' read -r _ pr uri dist; do
+    [ "$(p2s_url_origin "$uri" "$dist")" = ppa ] || continue
+    ppa=yes
+    if [ "$pr" -lt 0 ]; then [ "$held" = no ] || held=yes; else held=no; fi
+  done < <(p2s_policy_sources "$out")
+  echo "$inst $cand $ppa $(p2s_build_origin "$out" "$inst") $(p2s_build_origin "$out" "$cand") $held"
 }
 
 # The pin the keeper writes for a branch, one stanza per PPA site.

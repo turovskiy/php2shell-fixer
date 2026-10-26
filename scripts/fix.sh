@@ -153,14 +153,14 @@ p2s_fix_worker() {
     nver=$(dpkg-query -W -f='${Version}\n' $pkgs </dev/null 2>/dev/null | sort -u | grep -c .)
     [ "$nver" -le 1 ] || echo "WARNING: php$branch packages are on $nver different versions"
     cve=$(p2s_installed_cve "$branch")
-    read -r vafter rafter <<<"$(p2s_verdict "$branch" "$after" "$(p2s_origin "$after")" "$cve")"
+    read -r vafter rafter <<<"$(p2s_verdict "$branch" "$after" "$(p2s_package_origin "$ppkg" "$after")" "$cve")"
     echo "php$branch now $after: $vafter ($rafter)"
 
     for row in "${running[@]}"; do
       IFS='|' read -r sapi pkg sbefore <<<"$row"
       unit=$(p2s_sapi_unit "$branch" "$sapi")
       safter=$(dpkg-query -W -f='${Version}' "$pkg" </dev/null 2>/dev/null)
-      read -r svafter _ <<<"$(p2s_verdict "$branch" "$safter" "$(p2s_origin "$safter")" "$cve")"
+      read -r svafter _ <<<"$(p2s_verdict "$branch" "$safter" "$(p2s_package_origin "$pkg" "$safter")" "$cve")"
       state=$bstate restart=skipped changed=$installed
       [ "${needed[$sapi]}" = needed ] && changed=yes
       if [ -z "$state" ]; then

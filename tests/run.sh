@@ -81,12 +81,15 @@ for h in "$WORK"/hosts/*/; do
   [ -d "$h/remote" ] && apthelper "$h"
 done
 
-for d in "$WORK"/hosts/*/debs/*/; do
-  [ -d "$d" ] || continue
-  key=$(basename "$d")
+debtar() { # debtar <debs/<package>=<version> dir>
+  local key
+  key=$(basename "$1")
   mkdir -p "$WORK/pkg/$key/usr/share/doc/${key%%=*}"
-  cp "$d/changelog.Debian.gz" "$WORK/pkg/$key/usr/share/doc/${key%%=*}/"
-  tar -C "$WORK/pkg/$key" -cf "${d%/}.tar" ./usr
+  cp "$1/changelog.Debian.gz" "$WORK/pkg/$key/usr/share/doc/${key%%=*}/"
+  tar -C "$WORK/pkg/$key" -cf "${1%/}.tar" ./usr
+}
+for d in "$WORK"/hosts/*/debs/*/; do
+  [ -d "$d" ] && debtar "$d"
 done
 
 # Patcher hosts: web-m as is, and copies of it with one thing going wrong each.
@@ -110,7 +113,41 @@ printf '%s\n' 'api.example.com 200 200' 'http://shop.example.com:8080 200 200 12
 # mod_php hosts: web-w is web-l with an Apache config that fails its configtest.
 cp -r "$WORK/hosts/web-l" "$WORK/hosts/web-w"
 : >"$WORK/hosts/web-w/fail-configtest"
-for h in "$WORK"/hosts/*/root; do mkdir -p "$h/root"; done   # /root, where the patcher keeps its backup
+# web-m as a Debian trixie host, swapped in for its own block (every letter is taken): Debian's own 8.4.11-1
+# from deb.debian.org, unfixed, and the fixed 8.4.11-1+deb13u1 from security.debian.org. The plain revision
+# carries no ~debNN or +debNN: only the source apt-cache policy lists under it says the build is Debian's.
+DEB=$WORK/web-m.trixie DEB84=8.4.11-1+deb13u1
+cp -r "$WORK/hosts/web-m" "$DEB"
+rm -rf "$DEB/debs" "$DEB/madison"/* "$DEB/root/usr/share/doc"/* "$DEB/root/etc/php/8.5"
+mv "$DEB/root/etc/php/8.3" "$DEB/root/etc/php/8.4"
+sed -i 's/8\.3/8.4/' "$DEB/root/etc/php/8.4/fpm/pool.d/www.conf" "$DEB/root/etc/nginx/sites-enabled/shop"
+printf '%s\n' 'PRETTY_NAME="Debian GNU/Linux 13 (trixie)"' 'NAME="Debian GNU/Linux"' 'VERSION_ID="13"' \
+  'VERSION_CODENAME=trixie' 'ID=debian' >"$DEB/root/etc/os-release"
+printf 'ii |%s|8.4.11-1\n' php8.4-fpm php8.4-common php8.4-cli php8.4-opcache >"$DEB/dpkg-query.txt"
+echo php8.4-fpm >"$DEB/active.txt"
+printf ' php8.4-fpm | %s | %s\n' "$DEB84" 'http://security.debian.org/debian-security trixie-security/main amd64 Packages' \
+  8.4.11-1 'http://deb.debian.org/debian trixie/main amd64 Packages' >"$DEB/madison/php8.4-fpm.txt"
+mkdir -p "$DEB/root/usr/share/doc/php8.4-common" "$DEB/debs/php8.4-common=$DEB84" "$DEB/root/var/lib/apt/lists"
+printf '%s\n' 'php8.4 (8.4.11-1) unstable; urgency=medium' '  * New upstream version 8.4.11' \
+  | gzip -n >"$DEB/root/usr/share/doc/php8.4-common/changelog.Debian.gz"
+printf '%s\n' "php8.4 ($DEB84) trixie-security; urgency=medium" '  * Fix CVE-2026-109618 and CVE-2026-109619 (PHP2Shell)' \
+  | gzip -n >"$DEB/debs/php8.4-common=$DEB84/changelog.Debian.gz"
+debtar "$DEB/debs/php8.4-common=$DEB84"
+for f in deb.debian.org_debian_dists_trixie_main_binary-amd64_Packages \
+  security.debian.org_debian-security_dists_trixie-security_main_binary-amd64_Packages; do
+  touch -d '2026-10-24 06:00:00 UTC' "$DEB/root/var/lib/apt/lists/$f"
+done
+# web-m with an 8.3 build numbered like Ubuntu's fixed .13 that only the ondrej PPA serves, and whose changelog
+# names no fix: a rebuild, not Ubuntu's security build, so Ubuntu's threshold does not apply to it.
+PPA13=$WORK/web-m.ppa13
+cp -r "$WORK/hosts/web-m" "$PPA13"
+rm -rf "$PPA13/debs"
+sed -i 's/^\(ii |php8\.3-[a-z]*|\)8\.3\.6-0ubuntu0\.24\.04\.12$/\18.3.6-0ubuntu0.24.04.13/' "$PPA13/dpkg-query.txt"
+printf ' php8.3-fpm | %s | %s\n' 8.3.6-0ubuntu0.24.04.13 'https://ppa.launchpadcontent.net/ondrej/php/ubuntu noble/main amd64 Packages' \
+  >"$PPA13/madison/php8.3-fpm.txt"
+printf '%s\n' 'php8.3 (8.3.6-0ubuntu0.24.04.13) noble; urgency=medium' '  * Rebuild for the PPA' \
+  | gzip -n >"$PPA13/root/usr/share/doc/php8.3-common/changelog.Debian.gz"
+for h in "$WORK"/hosts/*/root "$DEB/root" "$PPA13/root"; do mkdir -p "$h/root"; done   # /root, where the patcher keeps its backup
 # web-y (Ubuntu 8.3 + PPA 8.4 with the ondrej PPA configured) runs the auto-update keeper several times, each
 # from this pristine copy with one thing added.
 cp -r "$WORK/hosts/web-y" "$WORK/web-y.pristine"
@@ -527,7 +564,7 @@ export TMPDIR=$WORK/hosttmp
 mkdir -p "$TMPDIR"
 
 # Calls an audit may make; anything else in the stub log is a write or a package operation.
-READ_ONLY='^(ssh (-o [^ ]+ )*[^ ]+ bash -s|hostname ?|apachectl -t -D DUMP_INCLUDES|dpkg-query .*|systemctl is-active [^ ]+|systemctl show -p ActiveEnterTimestamp --value [^ ]+|dpkg --compare-versions .*|apt-cache madison [^ ]+|apt-get download -q [^ ]+|dpkg-deb --fsys-tarfile [^ ]+|php-(fpm|cgi)[0-9.]+ -i|php[0-9.]+ -c [^ ]+ -i|apt-mark showhold|apt-config dump|nginx -T|apt-helper .* download-file [^ ]+ [^ ]+)$'
+READ_ONLY='^(ssh (-o [^ ]+ )*[^ ]+ bash -s|hostname ?|apachectl -t -D DUMP_INCLUDES|dpkg-query .*|systemctl is-active [^ ]+|systemctl show -p ActiveEnterTimestamp --value [^ ]+|dpkg --compare-versions .*|apt-cache madison [^ ]+|apt-cache policy [^ ]+|apt-get download -q [^ ]+|dpkg-deb --fsys-tarfile [^ ]+|php-(fpm|cgi)[0-9.]+ -i|php[0-9.]+ -c [^ ]+ -i|apt-mark showhold|apt-config dump|nginx -T|apt-helper .* download-file [^ ]+ [^ ]+)$'
 fingerprint() { (cd "$WORK/hosts" && find . -type f -exec md5sum {} + | sort); }
 
 echo "▸ verdict (installed build)"
@@ -567,6 +604,22 @@ $(p2s_url_origin http://deb.debian.org/debian trixie/main) \
 $(p2s_url_origin http://security.debian.org/debian-security trixie-security/main) \
 $(p2s_url_origin https://repo.example.com/php noble/main)" \
   "ppa ppa distro distro distro other" "source origin: by URL and suite, as apt names the list files"
+# apt-cache policy as apt >= 1.1 prints it on a trixie host with a third-party mirror.
+POL='php8.4-fpm:
+  Installed: 8.4.11-1
+  Candidate: 8.4.11-1+deb13u1
+  Version table:
+     8.4.12-1~deb13u1 500
+        500 https://repo.example.com/php trixie/main amd64 Packages
+     8.4.11-1+deb13u1 500
+        500 http://security.debian.org/debian-security trixie-security/main amd64 Packages
+ *** 8.4.11-1 500
+        500 https://repo.example.com/php trixie/main amd64 Packages
+        500 http://deb.debian.org/debian trixie/main amd64 Packages
+        100 /var/lib/dpkg/status'
+eq "$(p2s_build_origin "$POL" 8.4.11-1) $(p2s_build_origin "$POL" 8.4.11-1+deb13u1) $(p2s_build_origin "$POL" 8.4.12-1~deb13u1) \
+$(p2s_build_origin "$POL" 1:7.4.33-31+ubuntu24.04.1+deb.sury.org+1) $(p2s_build_origin "" 8.4.11-1)" "distro distro distro ppa other" \
+  "build origin: first source that says ppa or distro, else the version string (unknown mirror, build not listed)"
 p2s_changelog_has_cves "  - debian/patches/CVE-2026-109618_109619.patch" && ok "Ubuntu patch name counts as both CVEs" \
   || bad "Ubuntu patch name counts as both CVEs"
 p2s_changelog_has_cves "  - CVE-2026-109618 only" && bad "one CVE alone is not a fix" || ok "one CVE alone is not a fix"
@@ -1112,6 +1165,35 @@ has "$PR" "- HTTP probe: every status code unchanged" "report: probe unchanged"
 has "$PR" '- **Preflight stopped the patch: held**, held: `php8.3-fpm`' "report: preflight stop"
 has "$PR" '- `shop.example.com`: 200 -> 502 - **changed**' "report: changed site"
 hasnt "$PR" "No PHP-FPM, mod_php or PHP-CGI installed." "report: a fix log is not an empty host"
+
+echo "▸ origin from apt-cache policy sources"
+# web-m swapped for its Debian trixie copy and back; its logs kept apart from the report and next-step tests.
+mv "$WORK/hosts/web-m" "$WORK/web-m.ubuntu"
+cp -a "$DEB" "$WORK/hosts/web-m"   # -a: the lists keep their dates
+: >"$STUB_LOG"
+DA=$(P2S_CACHE=$WORK/cache-deb bash "$S/run.sh" audit web-m)
+has "$DA" "kind=host host=web-m os=debian-13" "Debian trixie: host record"
+has "$DA" "branch=8.4 sapi=fpm installed=8.4.11-1 origin=distro active=active cve_changelog=no verdict=unfixed reason=below-threshold target=$DEB84 target_reason=fixed-candidate" \
+  "Debian trixie: Debian's own 8.4.11-1 is a distro build and targets the fixed $DEB84"
+has "$DA" "kind=candidate host=web-m branch=8.4 version=$DEB84 origin=distro cve_changelog=yes verdict=fixed reason=changelog" \
+  "Debian trixie: the $DEB84 candidate judged from its own changelog"
+has "$DA" "lists_updated=2026-10-24T06:00:00Z lists_stale=no" "Debian trixie: dated by the Debian lists"
+DF=$(P2S_CACHE=$WORK/cache-deb bash "$S/run.sh" fix web-m); code=$?
+eq "$code" 0 "Debian trixie fix: exit 0"
+has "$(grep -E '^apt-get .* install ' "$STUB_LOG")" "php8.4-fpm=$DEB84" "Debian trixie fix: php8.4-fpm pinned to $DEB84"
+has "$DF" "kind=fix host=web-m branch=8.4 before=8.4.11-1 after=$DEB84 target=$DEB84 fixed=yes restart=done modules=same state=fixed" \
+  "Debian trixie fix: 8.4 installed, fixed, restarted"
+rm -rf "$WORK/hosts/web-m"
+cp -a "$PPA13" "$WORK/hosts/web-m"
+PA=$(P2S_CACHE=$WORK/cache-deb bash "$S/run.sh" audit web-m)
+has "$PA" "branch=8.3 sapi=fpm installed=8.3.6-0ubuntu0.24.04.13 origin=ppa active=active cve_changelog=no verdict=unfixed reason=below-threshold target=none" \
+  "Ubuntu-numbered .13 served only by the PPA: the PPA's build, Ubuntu's threshold does not fix it"
+PF=$(P2S_CACHE=$WORK/cache-deb bash "$S/run.sh" fix web-m); code=$?
+eq "$code" 3 "Ubuntu-numbered .13 from the PPA, fix: still unfixed -> exit 3"
+has "$PF" "kind=fix host=web-m branch=8.3 before=8.3.6-0ubuntu0.24.04.13 after=8.3.6-0ubuntu0.24.04.13 target=none fixed=no restart=done modules=same state=unfixed-mitigated" \
+  "Ubuntu-numbered .13 from the PPA, fix: judged as the PPA's build, mitigated"
+rm -rf "$WORK/hosts/web-m"
+mv "$WORK/web-m.ubuntu" "$WORK/hosts/web-m"
 
 echo "▸ autoupdate"
 # A host's whole tree, directories included: the keeper must not even create one where it has nothing to do.
