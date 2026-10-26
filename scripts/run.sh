@@ -17,7 +17,8 @@ usage() {
 
 bundle() {
   case $1 in
-    audit | ensure) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/mitigation.sh" "$HERE/$1.sh" ;;
+    audit) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/mitigation.sh" "$HERE/lib/hostfacts.sh" "$HERE/audit.sh" ;;
+    ensure) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/mitigation.sh" "$HERE/ensure.sh" ;;
     *) echo "unknown mode: $1" >&2; return 2 ;;
   esac
 }

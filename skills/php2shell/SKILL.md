@@ -13,7 +13,7 @@ Scripts live in `${CLAUDE_PLUGIN_ROOT}/scripts/`. Each run prints a human sectio
 
 1. **Audit** every host the operator names: `bash ${CLAUDE_PLUGIN_ROOT}/scripts/run.sh audit <host>`, where host is an ssh alias or `user@address`. The audit is read-only. When the permission layer denies the call, hand the operator the same line as a `!` command and read its output back. Done when each host either printed `log: <path>` with a host record in that log, or exited 255 (ssh failed: the host is unreachable).
 2. **Report**: `bash ${CLAUDE_PLUGIN_ROOT}/scripts/report.sh <log>...` over the logs from step 1. Show the operator the tables and list unreachable hosts beside them. Done when every host from step 1 has a section or an unreachable line.
-3. **Confirm the restart for every `fixed` branch.** The verdict judges the installed package; a running PHP-FPM keeps executing the build it started with until it is restarted, so a host can report `fixed` and still serve the vulnerable code. The audit does not check this yet. Per `fixed` branch, compare the service start (`systemctl show -p ActiveEnterTimestamp --value php<X.Y>-fpm`) with the package install time (`stat -c %y /var/lib/dpkg/info/php<X.Y>-fpm.list`), both read-only; hand them to the operator as `!` commands when the call is denied. Done when each `fixed` branch is either "started after install" or reported as "installed, restart not confirmed". Call a host protected only when all its branches are fixed and started after install.
+3. **Read the restart state of every `fixed` branch.** The verdict judges the installed package; a running PHP-FPM keeps executing the build it started with, so a host can report `fixed` and still serve the vulnerable code. The branch record's `restart` says which: `ok` (started after the newest package of the branch), `needed`, `not-running`, `unknown`. Call a host protected only when every branch is `fixed` with `restart=ok` or `not-running`; for `needed`, the restart is a write the operator runs (`systemctl restart php<X.Y>-fpm`).
 4. **Ensure the mitigation** on every host where a `mitigation` record is not `mitigated`: hand the operator `! bash ${CLAUDE_PLUGIN_ROOT}/scripts/run.sh ensure <host>`, since it writes `99-security.ini` and reloads FPM pools. Read its log back and run step 2 over it. Exit 0: every web SAPI mitigated. Exit 3: name each blocker from the records, and leave the fix to the operator, because the files are theirs: an `override` record that `enables=yes` (file, line, pool), a `foreign` 99-security.ini, a SAPI still `On` or `unknown`. Exit 1: a config test failed (the change was rolled back and the pool kept running) or a reload failed; show the output. Done when every host's newest log shows each web SAPI `mitigated` or a named blocker.
 5. **Stop at the report.** Patching and auto-updates are not built yet. For each `unfixed` branch, name the host, branch, reason and target. A target of `none` is a statement about the host's cached apt lists, never about whether a fix exists: when `lists_stale` is `yes` or `unknown`, say the lists predate the fixes (or are unknown) and that `apt-get update` comes first, which is a write the operator runs.
 
@@ -41,6 +41,15 @@ The audit judges the builds apt offers from the lists already on the host (it ne
 | `no-fixed-build-in-cached-lists` | PPA or other build, and the cached lists hold no fixed build of that origin |
 
 `lists_updated` is when the newest apt list of the branch's origin last changed; `lists_stale=yes` means it is older than the day the fixed builds came out, so the lists cannot contain one. Candidate records with `cve_changelog=download-failed` were judged by version thresholds alone.
+
+## Host facts
+
+The audit's last section tells the operator how to patch; report these alongside the verdicts:
+
+- `pool used=no`: no nginx site points at the pool, so stopping it is an alternative to patching it. `used=unknown` (Apache running, or no readable nginx config) is never a stop candidate.
+- `hold`: apt will not upgrade a held package; the patch waits until the operator releases it.
+- `source release_info=changed`: the PPA changed its Release info (`changed=` names the fields), so `apt-get update` refuses that source and its lists stay stale until the operator accepts the change. `unknown`: no cached InRelease or the fetch failed.
+- `autoupdate ppa_covered=no` on a host with a PPA source: PHP from the PPA never updates by itself.
 
 ## Mitigation states
 

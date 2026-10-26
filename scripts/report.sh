@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Renders saved run logs as a markdown report, one section per host: a table of PHP-FPM branches (audit)
-# and a table of the upload_progress mitigation per web SAPI (audit and ensure), overrides listed below it.
+# Renders saved run logs as a markdown report, one section per host: a table of PHP-FPM branches (audit),
+# a table of the upload_progress mitigation per web SAPI (audit and ensure) with overrides below it, and
+# the host facts (audit): sites and pools, held packages, PPA sources, unattended-upgrades.
 # Reads only the "@p2s" records, so the report says exactly what the logged run found.
 # Usage: report.sh <log>...
 # Exit:  0; 1 when a log is unreadable or holds no host record; 2 on bad usage.
@@ -9,12 +10,13 @@ set -uo pipefail
 [ $# -gt 0 ] || { echo "usage: report.sh <log>..." >&2; exit 2; }
 
 rc=0
-branches=() mitigations=() overrides=()
+branches=() mitigations=() overrides=() sites=() pools=() holds=() sources=() origins=() facts=()
+dec() { local v=${1//%20/ }; echo "${v//%25/%}"; }   # values were encoded with p2s_enc
 flush() { # print the current host section
   [ -n "${cur_host:-}" ] || return 0
   if [ ${#branches[@]} -gt 0 ]; then
-    echo '| Branch | SAPI | Installed | Origin | Service | CVEs in changelog | Verdict | Reason | Target | apt lists |'
-    echo '|---|---|---|---|---|---|---|---|---|---|'
+    echo '| Branch | SAPI | Installed | Origin | Service | Restart | CVEs in changelog | Verdict | Reason | Target | apt lists |'
+    echo '|---|---|---|---|---|---|---|---|---|---|---|'
     printf '%s\n' "${branches[@]}"
   fi
   if [ ${#mitigations[@]} -gt 0 ]; then
@@ -30,7 +32,29 @@ flush() { # print the current host section
     printf '%s\n' "${overrides[@]}"
   fi
   [ ${#branches[@]} -gt 0 ] || [ ${#mitigations[@]} -gt 0 ] || echo 'No PHP-FPM or PHP-CGI installed.'
-  branches=() mitigations=() overrides=()
+  if [ ${#facts[@]} -gt 0 ]; then
+    printf '\n### Host facts\n\n'
+    printf '%s\n' "${facts[@]}"
+  fi
+  if [ ${#sites[@]} -gt 0 ]; then
+    printf '\n| Site | fastcgi_pass | Branch | Pool |\n|---|---|---|---|\n'
+    printf '%s\n' "${sites[@]}"
+  fi
+  if [ ${#pools[@]} -gt 0 ]; then
+    printf '\n| Branch | Pool | Listen | Sites | Used |\n|---|---|---|---|---|\n'
+    printf '%s\n' "${pools[@]}"
+  fi
+  if [ ${#holds[@]} -gt 0 ]; then
+    printf '\nHeld PHP packages (apt will not upgrade them): %s\n' "${holds[*]}"
+  fi
+  if [ ${#sources[@]} -gt 0 ]; then
+    printf '\n| PPA source | URI | Suite | Release info |\n|---|---|---|---|\n'
+    printf '%s\n' "${sources[@]}"
+  fi
+  if [ ${#origins[@]} -gt 0 ]; then
+    printf '\nunattended-upgrades origins: %s\n' "${origins[*]}"
+  fi
+  branches=() mitigations=() overrides=() sites=() pools=() holds=() sources=() origins=() facts=()
 }
 
 echo "# PHP2Shell report"
@@ -73,14 +97,52 @@ for log in "$@"; do
           yes) lists="**${r[lists_updated]%%T*}, older than the fixes**" ;;
           *) lists=${r[lists_updated]%%T*} ;;
         esac
-        branches+=("$(printf '| %s | %s | `%s` | %s | %s | %s | %s | %s | %s | %s |' "${r[branch]}" "${r[sapi]}" \
-          "${r[installed]}" "${r[origin]}" "${r[active]}" "${r[cve_changelog]}" "$v" "${r[reason]}" "$tgt" "$lists")")
+        # Logs written before the restart check carry no restart field.
+        case ${r[restart]:-} in
+          '') rs=- ;;
+          needed) rs="**needed** (started ${r[started]%%T*}, installed ${r[installed_at]%%T*})" ;;
+          *) rs=${r[restart]} ;;
+        esac
+        branches+=("$(printf '| %s | %s | `%s` | %s | %s | %s | %s | %s | %s | %s | %s |' "${r[branch]}" "${r[sapi]}" \
+          "${r[installed]}" "${r[origin]}" "${r[active]}" "$rs" "${r[cve_changelog]}" "$v" "${r[reason]}" "$tgt" "$lists")")
         ;;
       mitigation)
         m=${r[state]}
         [ "$m" = mitigated ] || m="**$m**"
         mitigations+=("$(printf '| %s | %s | %s | %s | %s | %s | %s |' "${r[branch]}" "${r[sapi]}" "${r[ini]}" \
           "${r[action]}" "${r[upload_progress]}" "${r[overrides]}" "$m")")
+        ;;
+      webserver)
+        facts+=("- Web servers: nginx ${r[nginx]}, apache2 ${r[apache2]}")
+        ;;
+      vhost)
+        sites+=("$(printf '| %s | `%s` | %s | %s |' "$(dec "${r[names]}")" "$(dec "${r[pass]}")" "${r[branch]}" "${r[pool]}")")
+        ;;
+      pool)
+        case ${r[used]} in
+          no) u="**unused: stop candidate**" ;;
+          unknown) u="unknown (Apache or no readable nginx config)" ;;
+          *) u=${r[used]} ;;
+        esac
+        pools+=("$(printf '| %s | %s | `%s` | %s | %s |' "${r[branch]}" "${r[pool]}" "$(dec "${r[listen]}")" "${r[sites]}" "$u")")
+        ;;
+      hold)
+        holds+=("\`${r[package]}\`")
+        ;;
+      source)
+        case ${r[release_info]} in
+          changed) ri="**changed: ${r[changed]}** - apt-get update refuses this source until the change is accepted" ;;
+          *) ri=${r[release_info]} ;;
+        esac
+        sources+=("$(printf '| `%s` | %s | %s | %s |' "${r[file]}" "${r[uri]}" "${r[suite]}" "$ri")")
+        ;;
+      autoupdate)
+        a="- unattended-upgrades: periodic ${r[periodic]}, ${r[origins]} origin(s), ondrej PPA covered: ${r[ppa_covered]}"
+        [ "${r[ppa_covered]}" = no ] && a+=" - **PPA PHP is not updated automatically**"
+        facts+=("$a")
+        ;;
+      uu_origin)
+        origins+=("\`$(dec "${r[value]}")\`")
         ;;
       override)
         o="- php${r[branch]} pool \`${r[pool]}\`: \`${r[file]}:${r[line]}\` ${r[directive]} = ${r[value]}"

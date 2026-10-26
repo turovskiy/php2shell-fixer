@@ -15,6 +15,11 @@ p2s_os() {
   if [ -n "$id$ver" ]; then echo "$id-$ver"; else echo unknown; fi
 }
 
+# UTC ISO time of a Unix timestamp, or unknown for an empty one.
+p2s_iso() {
+  if [ -n "${1:-}" ]; then date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; else echo unknown; fi
+}
+
 # One machine-readable record: "@p2s schema=1 key=value ...". Values carry no spaces.
 p2s_record() {
   printf '@p2s schema=%s' "$P2S_SCHEMA"
