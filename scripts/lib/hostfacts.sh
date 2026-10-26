@@ -1,4 +1,4 @@
-# Host facts that decide how to patch: which site runs on which FPM pool, whether FPM restarted after
+# Host facts that decide how to patch: which site runs on which FPM pool (and which sites Apache serves), whether FPM restarted after
 # the last PHP install, held packages, the ondrej/sury sources and their Release info, unattended-upgrades.
 # Read-only. Sourced after p2s.sh; used by audit.sh.
 
@@ -45,6 +45,17 @@ p2s_nginx_sites() { # $1 nginx -T output
         else print site[i]
       }
     }' <<<"$1"
+}
+
+# Site names from "apachectl -S" output (Apache's own vhost dump, so symlinked and included sites count),
+# one per line, sorted, each once: name-based vhosts ("port 443 namevhost <name>", "default server <name>"),
+# their aliases, and single vhosts ("*:80 <name> (<file>:<line>)"). Wildcard aliases are skipped.
+p2s_apache_sites() { # $1 apachectl -S output
+  awk '
+    $1 == "port" && $3 == "namevhost" { print $4; next }
+    $1 == "default" && $2 == "server" { print $3; next }
+    $1 == "alias" { print $2; next }
+    $1 ~ /:[0-9]+$/ && $3 ~ /^\(/ { print $2 }' <<<"$1" | sort -u
 }
 
 # Do an FPM listen address and an nginx fastcgi_pass point at the same socket?

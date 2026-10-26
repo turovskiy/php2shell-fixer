@@ -383,6 +383,21 @@ $(yes_no p2s_listen_matches 127.0.0.1:9000 localhost:9000) \
 $(yes_no p2s_listen_matches 127.0.0.1:9000 127.0.0.1:9001) \
 $(yes_no p2s_listen_matches 10.0.0.5:9000 127.0.0.1:9000)" \
   "yes no yes yes no no" "listen vs fastcgi_pass: /var/run is /run, bare port, loopback names, port and address mismatch"
+AS='AH00558: apache2: Could not reliably determine the server'"'"'s fully qualified domain name
+VirtualHost configuration:
+*:443                  is a NameVirtualHost
+         default server shop.example.com (/etc/apache2/sites-enabled/shop.conf:1)
+         port 443 namevhost shop.example.com (/etc/apache2/sites-enabled/shop.conf:1)
+                 alias www.shop.example.com
+                 wild alias *.shop.example.com
+         port 443 namevhost blog.example.org (/etc/apache2/sites-enabled/blog.conf:1)
+*:80                   static.example.net (/etc/apache2/sites-enabled/static.conf:1)
+[2001:db8::1]:443      v6.example.com (/etc/apache2/sites-enabled/v6.conf:1)
+ServerRoot: "/etc/apache2"
+Main DocumentRoot: "/var/www/html"
+User: name="www-data" id=33'
+eq "$(p2s_apache_sites "$AS")" "$(printf '%s\n' blog.example.org shop.example.com static.example.net v6.example.com www.shop.example.com)" \
+  "apachectl -S: name-based vhosts, aliases and single vhosts, once each; wildcard aliases and settings skipped"
 eq "$(p2s_inrelease_name https://ppa.launchpadcontent.net/ondrej/php/ubuntu/ noble)" \
   "ppa.launchpadcontent.net_ondrej_php_ubuntu_dists_noble_InRelease" "cached InRelease name, trailing slash ignored"
 eq "$(p2s_release_info "$(printf 'Origin: X\nLabel: A B\nDate: now\nSuite: noble\n')")" "$(printf 'Label: A B\nOrigin: X\nSuite: noble')" \
@@ -786,6 +801,16 @@ eq "$(grep -E '^systemctl (reload|restart|stop) ' "$STUB_LOG")" "" "web-w fix: A
 has "$Wf" "kind=fix host=web-w branch=8.3 before=8.3.6-0ubuntu0.24.04.12 after=8.3.6-0ubuntu0.24.04.13 target=8.3.6-0ubuntu0.24.04.13 fixed=yes restart=skipped modules=same state=test-failed sapi=apache2" \
   "web-w fix: installed, but Apache left alone on the failed configtest"
 
+# mod_php only, no nginx: the probe finds the sites through apachectl -S.
+: >"$STUB_LOG"
+Lf=$(bash "$S/run.sh" fix web-l); code=$?
+eq "$code" 0 "web-l fix: mod_php fixed, exit 0"
+has "$Lf" "kind=fix host=web-l branch=8.3 before=8.3.6-0ubuntu0.24.04.12 after=8.3.6-0ubuntu0.24.04.13 target=8.3.6-0ubuntu0.24.04.13 fixed=yes restart=done modules=same state=fixed sapi=apache2" \
+  "web-l fix: installed, Apache restarted"
+eq "$(grep -E '^systemctl (restart|reload) ' "$STUB_LOG")" "systemctl restart apache2" "web-l fix: Apache restarted once"
+has "$Lf" "kind=probe host=web-l name=shop.example.com before=200 after=200" "web-l fix: Apache vhost probed before and after"
+has "$Lf" "kind=probe_summary host=web-l state=unchanged" "web-l fix: Apache-only host is not 'no sites'"
+
 # One branch served by both FPM and mod_php: one pinned install, both SAPIs mitigated, tested, restarted.
 : >"$STUB_LOG"
 X=$(bash "$S/run.sh" fix web-x); code=$?
@@ -806,6 +831,11 @@ has "$X" "kind=mitigation host=web-x branch=8.3 sapi=apache2 ini=absent action=w
 has "$X" "kind=mitigation host=web-x branch=8.3 sapi=fpm ini=absent action=written upload_progress=Off overrides=0 state=mitigated" \
   "web-x: FPM mitigated"
 has "$X" "rm /etc/php/8.3/apache2/conf.d/99-security.ini && systemctl reload apache2" "web-x: rollback line for the mod_php ini"
+has "$X" "kind=probe host=web-x name=api.example.com before=200 after=200" "web-x: nginx site probed"
+has "$X" "kind=probe host=web-x name=shop.example.com before=200 after=200" "web-x: Apache vhost probed"
+has "$X" "kind=probe host=web-x name=www.shop.example.com before=301 after=301" "web-x: Apache alias probed"
+has "$X" "kind=probe host=web-x name=blog.example.org before=200 after=200" "web-x: second Apache vhost probed"
+eq "$(grep -c 'kind=probe host=web-x name=shop.example.com ' <<<"$X")" 1 "web-x: a vhost listed as default server and as namevhost probed once"
 XR=$(bash "$S/report.sh" "$(ls "$P2S_CACHE"/web-x-fix-*.log)")
 has "$XR" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.12` | `8.3.6-0ubuntu0.24.04.13` | `8.3.6-0ubuntu0.24.04.13` | yes | done | same | fixed |' "report: FPM patch row"
 has "$XR" '| 8.3 | apache2 | `8.3.6-0ubuntu0.24.04.12` | `8.3.6-0ubuntu0.24.04.13` | `8.3.6-0ubuntu0.24.04.13` | yes | done | same | fixed |' "report: mod_php patch row"

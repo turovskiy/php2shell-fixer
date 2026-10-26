@@ -17,11 +17,16 @@ export LC_ALL=C
 
 P2S_STATE=$(p2s_path /var/lib/php2shell)
 
-# HTTP status of every PHP site nginx serves, one "name code" per line, asked locally over 443.
+# HTTP status of every site nginx sends to PHP and every vhost Apache serves, one "name code" per line, asked
+# locally over 443. Both dumps are the effective config, so symlinked and included sites count; a name in
+# both is asked once.
 p2s_probe() {
-  local ngx n
-  ngx=$(nginx -T </dev/null 2>/dev/null) || return 0
-  p2s_nginx_sites "$ngx" | cut -d'|' -f1 | tr ',' '\n' | grep -E '^[A-Za-z0-9.-]+\.[A-Za-z]+$' | sort -u | head -25 \
+  local ngx aps n
+  {
+    if ngx=$(nginx -T </dev/null 2>/dev/null); then p2s_nginx_sites "$ngx" | cut -d'|' -f1 | tr ',' '\n'; fi
+    # apachectl -S prints warnings (AH00558) with the dump; the parser keeps only vhost lines.
+    if aps=$(apachectl -S </dev/null 2>&1); then p2s_apache_sites "$aps"; fi
+  } | grep -E '^[A-Za-z0-9.-]+\.[A-Za-z]+$' | sort -u | head -25 \
     | while read -r n; do
       printf '%s %s\n' "$n" "$(curl -sk -o /dev/null -m 15 -w '%{http_code}' --resolve "$n:443:127.0.0.1" "https://$n/" </dev/null)"
     done
