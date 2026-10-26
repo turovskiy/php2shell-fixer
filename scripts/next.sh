@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The next step per host, read from the newest saved log of each mode, so an interrupted session resumes
-# where it stopped. Steps: audit, fix, ensure, verify (audit again after a write), done.
+# where it stopped. Steps: audit, fix, ensure, autoupdate, verify (audit again after a write), done.
 # Usage: next.sh --latest       every run.sh log in ${P2S_CACHE:-$XDG_CACHE_HOME/php2shell}
 #        next.sh <log>...
 # Prints one "<host>: <step> - <reason>" line per host. Exit 0; 2 on bad usage or no logs.
@@ -21,11 +21,11 @@ newest=$(p2s_newest_logs "${logs[@]}")
 
 word() { sed -nE "s/.*(^| )$1=([^ ]*).*/\\2/p" <<<"$2"; }   # word <key> <summary>
 
-# One host at a time: its newest audit, and its newest write run (ensure or fix) if that is newer.
+# One host at a time: its newest audit, and its newest write run (ensure, fix, autoupdate) if that is newer.
 for target in $(cut -f1 <<<"$newest" | sort -u); do
   rows=$(awk -F'\t' -v t="$target" '$1 == t' <<<"$newest")
   audit=$(awk -F'\t' '$2 == "audit"' <<<"$rows")
-  write=$(awk -F'\t' '$2 == "ensure" || $2 == "fix"' <<<"$rows" | sort -t "$(printf '\t')" -k3,3r | head -1)
+  write=$(awk -F'\t' '$2 == "ensure" || $2 == "fix" || $2 == "autoupdate"' <<<"$rows" | sort -t "$(printf '\t')" -k3,3r | head -1)
   a_stamp=$(cut -f3 <<<"$audit")
   if [ -z "$audit" ]; then
     step=audit reason="no audit yet"
@@ -44,6 +44,9 @@ for target in $(cut -f1 <<<"$newest" | sort -u); do
           [ "$(word unmitigated "$w")" = - ] || reason+=", not mitigated: $(word unmitigated "$w")"
           [ "$(word overrides "$w")" = - ] || reason+=", pool override: $(word overrides "$w") (the operator removes it)"
           [ "$(word apache_overrides "$w")" = - ] || reason+=", Apache override: $(word apache_overrides "$w") (the operator removes it)"
+          [ "$(word refused "$w")" = - ] || reason+=", refused: php$(word refused "$w" | sed 's/,/, php/g') would change origin"
+          [ "$(word loose_pins "$w")" = - ] || reason+=", pin that does not hold: $(word loose_pins "$w")"
+          [ "$(word keeper "$w")" != dryrun-failed ] || reason+=", unattended-upgrade --dry-run did not accept the PPA origin"
           ;;
       esac
     elif [ "$a_status" = unreachable ] || [ "$a_status" = timeout ] || [ "$(word reached "$a")" = no ]; then
@@ -58,6 +61,8 @@ for target in $(cut -f1 <<<"$newest" | sort -u); do
       [ "$(word apache_overrides "$a")" = - ] || reason+=", Apache override: $(word apache_overrides "$a") (the operator removes it)"
     elif [ "$(word hook "$a")" = missing ] || [ "$(word hook "$a")" = outdated ]; then
       step=ensure reason="mitigated, but the apt hook that keeps it in place is $(word hook "$a")"
+    elif [ "$(word ppa "$a")" = yes ] && [ "$(word ppa_covered "$a")" = no ]; then
+      step=autoupdate reason="the ondrej PPA is configured, but unattended-upgrades does not install PHP updates from it"
     else
       step=done reason="every branch fixed and restarted, every web SAPI mitigated"
     fi

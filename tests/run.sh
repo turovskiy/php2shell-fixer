@@ -1030,6 +1030,7 @@ TB=$(tree web-b)
 : >"$STUB_LOG"
 AB=$(bash "$S/run.sh" autoupdate web-b); code=$?
 eq "$code" 0 "web-b (PPA builds, no PPA source): exit 0"
+LOG_AB=$(sed -n 's/^log: //p' <<<"$AB")
 has "$AB" "kind=keeper host=web-b state=no-ppa" "web-b: no PPA, nothing to keep"
 eq "$(tree web-b)" "$TB" "web-b: no file written, no directory made"
 eq "$(grep -cE '^(apt-cache policy|unattended-upgrade) ' "$STUB_LOG")" 0 "web-b: apt not even asked"
@@ -1038,6 +1039,7 @@ yreset
 : >"$STUB_LOG"
 AY=$(bash "$S/run.sh" autoupdate web-y); code=$?
 eq "$code" 0 "web-y: Ubuntu 8.3 pinned, PPA origin added -> exit 0"
+LOG_AY=$(sed -n 's/^log: //p' <<<"$AY")
 PIN=$(cat "$(y $PIN83)" 2>/dev/null)
 has "$PIN" "Package: php8.3 php8.3-* libapache2-mod-php8.3" "web-y: the pin covers every package of the 8.3 branch"
 has "$PIN" "Pin: origin ppa.launchpadcontent.net" "web-y: the pin names the PPA's site"
@@ -1064,6 +1066,7 @@ TY=$(tree web-y)
 : >"$STUB_LOG"
 AY2=$(bash "$S/run.sh" autoupdate web-y); code=$?
 eq "$code" 0 "web-y second run: exit 0"
+LOG_AY2=$(sed -n 's/^log: //p' <<<"$AY2")
 eq "$(tree web-y)" "$TY" "web-y second run: nothing written"
 has "$AY2" "kind=pin host=web-y branch=8.3 file=$PIN83 action=present" "web-y second run: its own pin recognised"
 has "$AY2" "kind=uu_entry host=web-y value=LP-PPA-ondrej-php:noble file=- action=present" "web-y second run: origin entry recognised"
@@ -1078,6 +1081,7 @@ printf 'Package: php*\nPin: origin ppa.launchpadcontent.net\nPin-Priority: 900\n
 : >"$STUB_LOG"
 AR=$(bash "$S/run.sh" autoupdate web-y); code=$?
 eq "$code" 1 "web-y refused: a candidate would change origin -> exit 1"
+LOG_AR=$(sed -n 's/^log: //p' <<<"$AR")
 has "$AR" "STOP: php8.3: apt would move php8.3-fpm php8.3-common from the distro build to ppa ($SU835)" "web-y refused: names the branch, its packages and the candidate"
 has "$AR" "kind=policy host=web-y branch=8.3 origin=distro package=php8.3-fpm installed=$U83 before=$SU835 candidate=$SU835 candidate_origin=ppa moved=php8.3-fpm,php8.3-common pin=$PIN83 state=pin-ineffective" \
   "web-y refused: candidate still the PPA's despite the pin"
@@ -1095,11 +1099,12 @@ mkdir -p "$(y /etc/apt/preferences.d)"
 printf 'Package: php8.3*\nPin: origin ppa.launchpadcontent.net\nPin-Priority: -1\n' >"$(y /etc/apt/preferences.d/ondrej-php.conf)"
 AI=$(bash "$S/run.sh" autoupdate web-y); code=$?
 eq "$code" 1 "web-y ignored pin: exit 1"
+LOG_AI=$(sed -n 's/^log: //p' <<<"$AI")
 has "$AI" "kind=pin host=web-y branch=8.3 file=/etc/apt/preferences.d/ondrej-php.conf action=present" "web-y ignored pin: recognised by content"
 eq "$(ls "$(y /etc/apt/preferences.d)")" "ondrej-php.conf" "web-y ignored pin: no duplicate pin written"
 has "$AI" "candidate=$SU835 candidate_origin=ppa moved=php8.3-fpm,php8.3-common pin=/etc/apt/preferences.d/ondrej-php.conf state=pin-ineffective" \
   "web-y ignored pin: detected as ineffective, the candidate still the PPA's"
-has "$AI" "mv /etc/apt/preferences.d/ondrej-php.conf /etc/apt/preferences.d/ondrej-php.conf.pref" "web-y ignored pin: says how to make apt read it"
+has "$AI" "mv /etc/apt/preferences.d/ondrej-php.conf /etc/apt/preferences.d/ondrej-php.pref" "web-y ignored pin: says how to make apt read it"
 [ -e "$(y $UUC)" ] && bad "web-y ignored pin: no origin entry" || ok "web-y ignored pin: no origin entry"
 
 # Equivalent config already in place under other names, in other forms: nothing written.
@@ -1213,7 +1218,16 @@ has "$NX" "never-audited: audit - no audit yet" "next: no audit -> audit"
 has "$NX" "fix-ok: verify - fix finished after the last audit" "next: successful fix -> verify"
 has "$NX" "fix-partial: fix - last fix: exit-3, unfixed: php8.4" "next: fix that left a branch unfixed names it"
 has "$NX" "hook-missing: ensure - mitigated, but the apt hook that keeps it in place is missing" "next: missing apt hook -> ensure"
-eq "$(wc -l <<<"$NX")" 13 "next: one line per host"
+has "$NX" "needs-autoupdate: autoupdate - the ondrej PPA is configured, but unattended-upgrades does not install PHP updates from it" \
+  "next: everything fixed, PPA not covered -> autoupdate"
+eq "$(wc -l <<<"$NX")" 14 "next: one line per host"
+LOG_YA=$(ls "$P2S_CACHE"/web-y-audit-*.log)
+eq "$(bash "$S/next.sh" "$LOG_YA" "$LOG_AY2")" "web-y: verify - autoupdate finished after the last audit; audit again to confirm" \
+  "next: autoupdate after the audit -> verify"
+eq "$(bash "$S/next.sh" "$LOG_YA" "$LOG_AR")" "web-y: autoupdate - last autoupdate: exit-1, refused: php8.3 would change origin, pin that does not hold: $PIN83" \
+  "next: refused autoupdate names the branch and the pin"
+eq "$(bash "$S/next.sh" "$LOG_YA" "$LOG_AI")" "web-y: autoupdate - last autoupdate: exit-1, refused: php8.3 would change origin, pin that does not hold: /etc/apt/preferences.d/ondrej-php.conf" \
+  "next: an ignored pin is named"
 NL=$(bash "$S/next.sh" "$(ls "$P2S_CACHE"/web-l-audit-*.log)")
 eq "$NL" "web-l: fix - unfixed: php8.3/apache2" "next: unfixed mod_php named with its SAPI"
 NV=$(bash "$S/next.sh" "$P2S_CACHE"/web-v-*.log)
@@ -1246,6 +1260,21 @@ VR=$(bash "$S/report.sh" "$(ls "$P2S_CACHE"/web-v-ensure-*.log)")
 has "$VR" '| 8.3 | apache2 | absent | written | Off | 1 | **override** |' "report: mod_php mitigation row"
 has "$VR" '- php8.3 Apache: `/etc/apache2/sites-enabled/shop.conf:6` php_admin_flag = on - **re-enables it**' \
   "report: Apache override listed as Apache's, with file and line"
+AYR=$(bash "$S/report.sh" "$LOG_AY")
+has "$AYR" "## web-y (ubuntu-24.04)" "report: keeper log has its host section"
+hasnt "$AYR" "No PHP-FPM or PHP-CGI installed." "report: a keeper log is not an empty host"
+has "$AYR" '| 8.3 | distro | php8.3-fpm | `8.3.6-0ubuntu0.24.04.13` | `8.3.35-1+ubuntu24.04.1+deb.sury.org+1` (ppa) | `8.3.6-0ubuntu0.24.04.13` (distro) | `/etc/apt/preferences.d/php2shell-php8.3.pref` | kept |' \
+  "report: keeper row for the pinned distro branch"
+has "$AYR" '| 8.4 | ppa | php8.4-fpm | `8.4.17-1+ubuntu24.04.1+deb.sury.org+1` | `8.4.27-1+ubuntu24.04.1+deb.sury.org+1` (ppa) | `8.4.27-1+ubuntu24.04.1+deb.sury.org+1` (ppa) | - | kept |' \
+  "report: keeper row for the PPA branch"
+has "$AYR" '- Pin for php8.3: `/etc/apt/preferences.d/php2shell-php8.3.pref` (written)' "report: pin listed"
+has "$AYR" '- unattended-upgrades origin `LP-PPA-ondrej-php:noble`: written to `/etc/apt/apt.conf.d/51php2shell-ppa-origins`' "report: origin entry listed"
+has "$AYR" '- unattended-upgrade --dry-run: ok, accepts LP-PPA-ondrej-php' "report: dry run listed"
+has "$AYR" '- Auto-update keeper: configured' "report: keeper result"
+ARR=$(bash "$S/report.sh" "$LOG_AR")
+has "$ARR" '| `/etc/apt/preferences.d/php2shell-php8.3.pref` | **pin-ineffective**: php8.3-fpm,php8.3-common would move |' "report: refused branch in bold with what would move"
+has "$ARR" '- Auto-update keeper: **refused** (php8.3): the origin entry was not written' "report: refusal stated"
+has "$(bash "$S/report.sh" "$LOG_AB")" '- Auto-update keeper: no ondrej/sury PPA on this host, nothing written' "report: no-PPA host"
 printf '@p2s schema=1 kind=host host=old os=ubuntu-24.04\n@p2s schema=1 kind=branch host=old branch=8.3 sapi=fpm installed=8.3.6-0ubuntu0.24.04.13 origin=distro active=active cve_changelog=yes verdict=fixed reason=distro-threshold\n' >"$WORK/old.log"
 JR=$(bash "$S/report.sh" "$(ls "$P2S_CACHE"/web-j-audit-*.log)")
 has "$JR" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.13` | distro | active | **needed** (started 2026-10-20, installed 2026-10-22) |' "report: restart needed with both dates"

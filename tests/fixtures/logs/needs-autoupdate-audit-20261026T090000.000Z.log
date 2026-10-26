@@ -1,0 +1,8 @@
+@p2s schema=1 kind=run target=needs-autoupdate mode=audit started=20261026T090000.000Z
+@p2s schema=1 kind=host host=needs-autoupdate os=ubuntu-24.04
+@p2s schema=1 kind=branch host=needs-autoupdate branch=8.4 sapi=fpm verdict=fixed restart=ok
+@p2s schema=1 kind=mitigation host=needs-autoupdate branch=8.4 sapi=fpm state=mitigated
+@p2s schema=1 kind=ensure_hook host=needs-autoupdate state=present
+@p2s schema=1 kind=source host=needs-autoupdate file=/etc/apt/sources.list.d/ondrej-php.list uri=https://ppa.launchpadcontent.net/ondrej/php/ubuntu suite=noble release_info=same changed=-
+@p2s schema=1 kind=autoupdate host=needs-autoupdate periodic=1 origins=2 ppa_covered=no
+@p2s schema=1 kind=run_end target=needs-autoupdate mode=audit exit=0 status=ok

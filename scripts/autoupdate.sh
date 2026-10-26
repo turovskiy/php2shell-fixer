@@ -146,7 +146,8 @@ for b in $branches; do
   fi
   p2s_record kind=policy host="$host" branch="$b" origin="${b_origin[$b]}" package="${b_rep[$b]}" installed="${b_inst[$b]}" \
     before="${b_before[$b]:-(none)}" candidate="$cand" candidate_origin="$corigin" \
-    moved="$(if [ ${#moved[@]} -gt 0 ]; then IFS=,; echo "${moved[*]}"; else echo -; fi)" pin="${b_pin[$b]}" state="$state"
+    moved="$(if [ ${#moved[@]} -gt 0 ]; then IFS=,; echo "${moved[*]}"; else echo -; fi)" pin="${b_pin[$b]}" state="$state" \
+    before_origin="$(p2s_origin "${b_before[$b]:-(none)}")"
   echo "php$b (${b_origin[$b]}): ${b_rep[$b]} candidate ${b_before[$b]:-(none)} before, $cand ($corigin) now: $state"
   [ "$state" = kept ] && continue
   echo "STOP: php$b: apt would move ${moved[*]} from the ${b_origin[$b]} build to $corigin ($cand)"
@@ -158,7 +159,7 @@ for b in $branches; do
       n=${f##*/}
       if [[ $f == "$P2S_PIN_DIR"/* && $n == *.* && $n != *.pref ]]; then
         echo "  apt reads a preferences.d file only without an extension or with .pref, and skips $f; rename it:"
-        echo "    mv $f $f.pref"
+        echo "    mv $f ${f%.*}.pref"
       fi
     done
   fi
