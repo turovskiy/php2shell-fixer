@@ -101,6 +101,9 @@ derive web-s slow-install 3                        # connection drops mid-upgrad
 echo 1 >"$WORK/hosts/web-s/drop-after"
 derive web-u slow-install 5                        # connection drops; next run attaches to the running unit
 echo 1 >"$WORK/hosts/web-u/drop-after"
+# mod_php hosts: web-w is web-l with an Apache config that fails its configtest.
+cp -r "$WORK/hosts/web-l" "$WORK/hosts/web-w"
+: >"$WORK/hosts/web-w/fail-configtest"
 for h in "$WORK"/hosts/*/root; do mkdir -p "$h/root"; done   # /root, where the patcher keeps its backup
 
 # Stubs, first on PATH. ssh runs the streamed program locally against the named host's fake root.
@@ -764,6 +767,24 @@ eq "$code" 0 "web-u: and follows it to its exit code"
 eq "$(ls "$WORK/hosts/web-u/units/" | wc -l)" 1 "web-u: no second patch while one runs"
 U3=$(bash "$S/run.sh" fix web-u); code=$?
 has "$U3" "patch started as unit" "web-u: a run reported once lets the next call start a new patch"
+
+echo "▸ fix: mod_php"
+: >"$STUB_LOG"
+We=$(bash "$S/run.sh" ensure web-w); code=$?
+eq "$code" 1 "web-w ensure: apachectl configtest fails -> exit 1"
+eq "$(ls "$WORK/hosts/web-w/root/etc/php/8.3/apache2/conf.d/99-security.ini" 2>/dev/null)" "" "web-w ensure: new ini removed"
+has "$We" "branch=8.3 sapi=apache2 ini=absent action=test-failed" "web-w ensure: failed configtest recorded"
+has "$We" "AH00526: Syntax error" "web-w ensure: configtest output shown"
+eq "$(grep -E '^systemctl (reload|restart|stop) ' "$STUB_LOG")" "" "web-w ensure: Apache neither reloaded nor restarted"
+: >"$STUB_LOG"
+Wf=$(bash "$S/run.sh" fix web-w); code=$?
+eq "$code" 1 "web-w fix: apachectl configtest fails -> exit 1"
+has "$(grep -E '^apt-get .* install ' "$STUB_LOG")" "libapache2-mod-php8.3=8.3.6-0ubuntu0.24.04.13" "web-w fix: mod_php pinned to the target"
+eq "$(ls "$WORK/hosts/web-w/root/etc/php/8.3/apache2/conf.d/99-security.ini" 2>/dev/null)" "" "web-w fix: new ini removed"
+has "$(grep '^apachectl ' "$STUB_LOG")" "apachectl configtest" "web-w fix: Apache config tested"
+eq "$(grep -E '^systemctl (reload|restart|stop) ' "$STUB_LOG")" "" "web-w fix: Apache not restarted"
+has "$Wf" "kind=fix host=web-w branch=8.3 before=8.3.6-0ubuntu0.24.04.12 after=8.3.6-0ubuntu0.24.04.13 target=8.3.6-0ubuntu0.24.04.13 fixed=yes restart=skipped modules=same state=test-failed sapi=apache2" \
+  "web-w fix: installed, but Apache left alone on the failed configtest"
 
 PR=$(bash "$S/report.sh" "$(ls "$P2S_CACHE"/web-m-fix-*.log)" "$(ls "$P2S_CACHE"/web-q-fix-*.log)" "$(ls "$P2S_CACHE"/web-t-fix-*.log)")
 has "$PR" '| 8.3 | `8.3.6-0ubuntu0.24.04.12` | `8.3.6-0ubuntu0.24.04.13` | `8.3.6-0ubuntu0.24.04.13` | yes | done | same | fixed |' "report: patch row"

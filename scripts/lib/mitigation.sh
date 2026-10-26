@@ -146,12 +146,13 @@ p2s_web_sapis() {
       $2 ~ /^libapache2-mod-php[0-9]+\.[0-9]+$/ { s = $2; sub(/^libapache2-mod-php/, "", s); print s, "apache2" }' | sort -u
 }
 
-# Does the SAPI still load its config? FPM has a config test; CGI has none, so the binary must at least
-# start without an ini error. Prints the tail of the output on failure.
+# Does the SAPI still load its config? FPM has a config test, mod_php has Apache's; CGI has none, so the
+# binary must at least start without an ini error. Prints the tail of the output on failure.
 p2s_config_ok() { # $1 branch, $2 sapi
   local out
   case $2 in
     fpm) out=$(php-fpm"$1" -t </dev/null 2>&1) ;;
+    apache2) out=$(apachectl configtest </dev/null 2>&1) ;;
     cgi) out=$(php-cgi"$1" -v </dev/null 2>&1) && ! grep -qiE 'parse error|syntax error' <<<"$out" ;;
   esac || { echo "$out" | tail -5; return 1; }
 }
