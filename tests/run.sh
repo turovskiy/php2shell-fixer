@@ -683,6 +683,15 @@ CMD=$(sed -nE 's/.*Post-Invoke \{ "(.*)"; \};/\1/p' "$HC" | sed "s#/usr/local/sb
 bash -c "$CMD"; code=$?
 eq "$code" 0 "apt's Post-Invoke command exits 0 even when the hook exits 7"
 
+# Apache with mod_php installed later: the hook gives it the ini too.
+printf 'ii |libapache2-mod-php8.3|8.3.6-0ubuntu0.24.04.13\n' >>"$WORK/hosts/web-f/dpkg-query.txt"
+mkdir -p "$WORK/hosts/web-f/root/etc/php/8.3/apache2/conf.d" "$WORK/hosts/web-f/root/etc/apache2"
+P2S_STUB=$WORK/hosts/web-f STUB_HOST=web-f "$HK"; code=$?
+eq "$code" 0 "hook run with a new mod_php: exit 0"
+eq "$(ini web-f 8.3/apache2)" "$INI" "hook run: the new mod_php got its ini"
+has "$(cat "$HL")" "kind=mitigation host=web-f branch=8.3 sapi=apache2 ini=absent action=written-not-running upload_progress=Off" \
+  "hook run: mod_php logged, Apache not running so nothing reloaded"
+
 H1=$(bash "$S/run.sh" audit web-f)
 has "$H1" "kind=ensure_hook host=web-f state=present" "audit: hook present"
 has "$A" "kind=ensure_hook host=web-a state=missing" "audit: hook missing"
@@ -916,6 +925,11 @@ has "$NX" "fix-ok: verify - fix finished after the last audit" "next: successful
 has "$NX" "fix-partial: fix - last fix: exit-3, unfixed: php8.4" "next: fix that left a branch unfixed names it"
 has "$NX" "hook-missing: ensure - mitigated, but the apt hook that keeps it in place is missing" "next: missing apt hook -> ensure"
 eq "$(wc -l <<<"$NX")" 13 "next: one line per host"
+NL=$(bash "$S/next.sh" "$(ls "$P2S_CACHE"/web-l-audit-*.log)")
+eq "$NL" "web-l: fix - unfixed: php8.3/apache2" "next: unfixed mod_php named with its SAPI"
+NV=$(bash "$S/next.sh" "$P2S_CACHE"/web-v-*.log)
+eq "$NV" "web-v: ensure - last ensure: exit-3, not mitigated: 8.3/apache2:override, Apache override: /etc/apache2/sites-enabled/shop.conf:6 (the operator removes it)" \
+  "next: an Apache override is named as one, with file and line"
 bash "$S/next.sh" >/dev/null 2>&1; code=$?
 eq "$code" 2 "next: no arguments -> exit 2"
 
@@ -936,6 +950,13 @@ has "$R" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.12` | distro | inactive | not-runn
 has "$R" '| below-threshold | none (no-fixed-build-in-cached-lists) |' "report: no target shows its reason"
 has "$R" '| distro-threshold | none (installed-fixed) |' "report: fixed branch shows installed-fixed"
 hasnt "$R" "kind=candidate" "report: candidate records not dumped"
+LR=$(bash "$S/report.sh" "$(ls "$P2S_CACHE"/web-l-audit-*.log)")
+has "$LR" '| 8.3 | apache2 | `8.3.6-0ubuntu0.24.04.12` | distro | active | **needed** (started 2026-10-20, installed 2026-10-22) | no | **unfixed** | below-threshold | `8.3.6-0ubuntu0.24.04.13` |' \
+  "report: mod_php branch row"
+VR=$(bash "$S/report.sh" "$(ls "$P2S_CACHE"/web-v-ensure-*.log)")
+has "$VR" '| 8.3 | apache2 | absent | written | Off | 1 | **override** |' "report: mod_php mitigation row"
+has "$VR" '- php8.3 Apache: `/etc/apache2/sites-enabled/shop.conf:6` php_admin_flag = on - **re-enables it**' \
+  "report: Apache override listed as Apache's, with file and line"
 printf '@p2s schema=1 kind=host host=old os=ubuntu-24.04\n@p2s schema=1 kind=branch host=old branch=8.3 sapi=fpm installed=8.3.6-0ubuntu0.24.04.13 origin=distro active=active cve_changelog=yes verdict=fixed reason=distro-threshold\n' >"$WORK/old.log"
 JR=$(bash "$S/report.sh" "$(ls "$P2S_CACHE"/web-j-audit-*.log)")
 has "$JR" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.13` | distro | active | **needed** (started 2026-10-20, installed 2026-10-22) |' "report: restart needed with both dates"
