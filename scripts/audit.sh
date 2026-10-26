@@ -4,9 +4,8 @@
 # run.sh audit <host>
 # Output: a human-readable section plus "@p2s" records (schema in p2s.sh): one "branch" record per PHP-FPM
 # or mod_php (SAPI apache2) branch with its verdict and target, one "candidate" record per build apt offers
-# for it, and one
-# "mitigation" record (plus "override" records) per web SAPI, then the host facts: web servers, sites and
-# pools, held packages, PPA sources with their Release info, unattended-upgrades.
+# for it, and one "mitigation" record (plus "override" records) per web SAPI, then the host facts: web
+# servers, sites and pools, held packages, PPA sources with their Release info, unattended-upgrades.
 set -u
 export LC_ALL=C
 
