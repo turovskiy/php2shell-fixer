@@ -1,0 +1,5 @@
+php8.4 (8.4.17-1+ubuntu24.04.1+deb.sury.org+1) noble; urgency=medium
+
+  * New upstream version 8.4.17
+
+ -- Packager <packager@ppa.example>  Thu, 15 Jan 2026 12:00:00 +0000

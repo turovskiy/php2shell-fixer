@@ -1,0 +1,17 @@
+{
+  "name": "php2shell-fixer",
+  "owner": {
+    "name": "Oleksii Turovskyi"
+  },
+  "metadata": {
+    "description": "PHP2Shell audit and patch plugin for Debian and Ubuntu servers"
+  },
+  "plugins": [
+    {
+      "name": "php2shell-fixer",
+      "source": "./",
+      "description": "Audit and patch PHP2Shell (CVE-2026-109618, CVE-2026-109619) and keep the CVE-2026-115560 mitigation in place",
+      "category": "security"
+    }
+  ]
+}

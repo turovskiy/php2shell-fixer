@@ -1,0 +1,20 @@
+{
+  "name": "php2shell-fixer",
+  "version": "0.1.0",
+  "description": "Audit and patch PHP2Shell (CVE-2026-109618, CVE-2026-109619) on Debian and Ubuntu servers running PHP-FPM or mod_php, and keep the CVE-2026-115560 mitigation in place",
+  "author": {
+    "name": "Oleksii Turovskyi",
+    "url": "https://github.com/turovskiy"
+  },
+  "homepage": "https://github.com/turovskiy/php2shell-fixer",
+  "repository": "https://github.com/turovskiy/php2shell-fixer",
+  "license": "MIT",
+  "keywords": [
+    "php",
+    "security",
+    "cve",
+    "debian",
+    "ubuntu",
+    "php-fpm"
+  ]
+}
