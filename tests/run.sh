@@ -623,7 +623,8 @@ Rr=$(bash "$S/run.sh" fix web-r); code=$?
 eq "$code" 1 "web-r: changed Release Label -> exit 1"
 has "$Rr" "apt-get update --allow-releaseinfo-change-label" "web-r: accept command printed"
 has "$Rr" "kind=preflight host=web-r result=failed reason=release-info-changed fields=Label" "web-r: preflight record"
-hasnt "$Rr" "kind=fix " "web-r: never accepted on its own, nothing installed"
+hasnt "$Rr" "kind=fix " "web-r: nothing installed"
+hasnt "$(grep '^apt-get ' "$STUB_LOG")" "--allow-releaseinfo-change" "web-r: the patcher never runs the accept command itself"
 
 Tt=$(bash "$S/run.sh" fix web-t); code=$?
 eq "$code" 3 "web-t: HTTP status changed -> exit 3"
