@@ -1,0 +1,221 @@
+---
+type: episode
+scope: project
+title: 'php2shell-fixer plugin: audit, ensure, fleet, detached patcher, apt hook'
+tags:
+  - bash
+  - php
+  - security
+  - claude-code-plugin
+  - testing
+  - promotion-candidate
+refs:
+  - project::project/php2shell-fixer
+session_id: 4703f3ae-189d-407f-bd61-9282b1acc928
+outcome: partial
+files_touched:
+  - .claude-plugin/marketplace.json
+  - .claude-plugin/plugin.json
+  - .gitignore
+  - CHANGELOG.md
+  - CLAUDE.md
+  - README.md
+  - docs/agents/domain.md
+  - docs/agents/issue-tracker.md
+  - docs/agents/triage-labels.md
+  - docs/knowledge/README.md
+  - scripts/audit.sh
+  - scripts/ensure.sh
+  - scripts/fix.sh
+  - scripts/lib/branch.sh
+  - scripts/lib/hostfacts.sh
+  - scripts/lib/logs.sh
+  - scripts/lib/mitigation.sh
+  - scripts/lib/p2s.sh
+  - scripts/lib/versions.sh
+  - scripts/next.sh
+  - scripts/report.sh
+  - scripts/run.sh
+  - skills/php2shell/SKILL.md
+  - tests/fixtures/hosts/web-a/active.txt
+  - tests/fixtures/hosts/web-a/dpkg-query.txt
+  - tests/fixtures/hosts/web-a/root/etc/os-release
+  - tests/fixtures/hosts/web-a/root/usr/share/doc/php8.3-common/changelog.Debian
+  - tests/fixtures/hosts/web-b/active.txt
+  - tests/fixtures/hosts/web-b/debs/php8.3-common=8.3.6-0ubuntu0.24.04.13/changelog.Debian
+  - tests/fixtures/hosts/web-b/debs/php8.4-common=8.4.20-1+ubuntu24.04.1+deb.sury.org+1/changelog.Debian
+  - tests/fixtures/hosts/web-b/dpkg-query.txt
+  - tests/fixtures/hosts/web-b/madison/php8.1-fpm.txt
+  - tests/fixtures/hosts/web-b/madison/php8.3-fpm.txt
+  - tests/fixtures/hosts/web-b/madison/php8.4-fpm.txt
+  - tests/fixtures/hosts/web-b/root/etc/os-release
+  - tests/fixtures/hosts/web-b/root/usr/share/doc/php8.3-common/changelog.Debian
+  - tests/fixtures/hosts/web-b/root/usr/share/doc/php8.4-common/changelog.Debian
+  - tests/fixtures/hosts/web-c/active.txt
+  - tests/fixtures/hosts/web-c/dpkg-query.txt
+  - tests/fixtures/hosts/web-c/root/etc/os-release
+  - tests/fixtures/hosts/web-d/active.txt
+  - tests/fixtures/hosts/web-d/apt-config.txt
+  - tests/fixtures/hosts/web-d/debs/php8.1-common=8.1.34-9+ubuntu24.04.1+deb.sury.org+1/changelog.Debian
+  - tests/fixtures/hosts/web-d/dpkg-query.txt
+  - tests/fixtures/hosts/web-d/madison/php7.4-fpm.txt
+  - tests/fixtures/hosts/web-d/madison/php8.1-fpm.txt
+  - tests/fixtures/hosts/web-d/remote/https___ppa.launchpadcontent.net_ondrej_php_ubuntu_dists_noble_InRelease
+  - tests/fixtures/hosts/web-d/root/etc/apt/sources.list
+  - tests/fixtures/hosts/web-d/root/etc/apt/sources.list.d/ondrej-php.list
+  - tests/fixtures/hosts/web-d/root/etc/os-release
+  - tests/fixtures/hosts/web-d/root/etc/php/8.1/fpm/pool.d/www.conf
+  - tests/fixtures/hosts/web-d/root/usr/share/doc/php7.4-common/changelog.Debian
+  - tests/fixtures/hosts/web-d/root/usr/share/doc/php8.1-common/changelog.Debian
+  - tests/fixtures/hosts/web-d/root/var/lib/apt/lists/ppa.launchpadcontent.net_ondrej_php_ubuntu_dists_noble_InRelease
+  - tests/fixtures/hosts/web-e/active.txt
+  - tests/fixtures/hosts/web-e/dpkg-query.txt
+  - tests/fixtures/hosts/web-e/madison/php8.1-fpm.txt
+  - tests/fixtures/hosts/web-e/root/etc/os-release
+  - tests/fixtures/hosts/web-e/root/usr/share/doc/php8.1-common/changelog.Debian
+  - tests/fixtures/hosts/web-f/active.txt
+  - tests/fixtures/hosts/web-f/dpkg-query.txt
+  - tests/fixtures/hosts/web-f/root/etc/os-release
+  - tests/fixtures/hosts/web-f/root/etc/php/8.3/cgi/conf.d/10-opcache.ini
+  - tests/fixtures/hosts/web-f/root/etc/php/8.3/cli/conf.d/10-opcache.ini
+  - tests/fixtures/hosts/web-f/root/etc/php/8.3/fpm/conf.d/10-opcache.ini
+  - tests/fixtures/hosts/web-f/root/etc/php/8.3/fpm/pool.d/www.conf
+  - tests/fixtures/hosts/web-f/root/etc/php/8.4/fpm/conf.d/10-opcache.ini
+  - tests/fixtures/hosts/web-f/root/etc/php/8.4/fpm/pool.d/www.conf
+  - tests/fixtures/hosts/web-g/active.txt
+  - tests/fixtures/hosts/web-g/dpkg-query.txt
+  - tests/fixtures/hosts/web-g/root/etc/os-release
+  - tests/fixtures/hosts/web-g/root/etc/php/8.3/cgi/conf.d/10-opcache.ini
+  - tests/fixtures/hosts/web-g/root/etc/php/8.3/cgi/conf.d/99-security.ini
+  - tests/fixtures/hosts/web-g/root/etc/php/8.3/fpm/conf.d/10-opcache.ini
+  - tests/fixtures/hosts/web-g/root/etc/php/8.3/fpm/conf.d/99-security.ini
+  - tests/fixtures/hosts/web-g/root/etc/php/8.3/fpm/pool.d/www.conf
+  - tests/fixtures/hosts/web-h/active.txt
+  - tests/fixtures/hosts/web-h/dpkg-query.txt
+  - tests/fixtures/hosts/web-h/root/etc/os-release
+  - tests/fixtures/hosts/web-h/root/etc/php/8.3/fpm/conf.d/10-opcache.ini
+  - tests/fixtures/hosts/web-h/root/etc/php/8.3/fpm/pool.d/shop.conf
+  - tests/fixtures/hosts/web-h/root/etc/php/8.3/fpm/pool.d/www.conf
+  - tests/fixtures/hosts/web-i/active.txt
+  - tests/fixtures/hosts/web-i/dpkg-query.txt
+  - tests/fixtures/hosts/web-i/fail-t-php-fpm8.3
+  - tests/fixtures/hosts/web-i/root/etc/os-release
+  - tests/fixtures/hosts/web-i/root/etc/php/8.3/fpm/conf.d/10-opcache.ini
+  - tests/fixtures/hosts/web-i/root/etc/php/8.3/fpm/pool.d/www.conf
+  - tests/fixtures/hosts/web-j/active.txt
+  - tests/fixtures/hosts/web-j/apt-config.txt
+  - tests/fixtures/hosts/web-j/dpkg-query.txt
+  - tests/fixtures/hosts/web-j/holds.txt
+  - tests/fixtures/hosts/web-j/remote/https___ppa.launchpadcontent.net_ondrej_php_ubuntu_dists_noble_InRelease
+  - tests/fixtures/hosts/web-j/root/etc/apt/sources.list.d/ondrej-nginx.list
+  - tests/fixtures/hosts/web-j/root/etc/apt/sources.list.d/ondrej-ubuntu-php-noble.sources
+  - tests/fixtures/hosts/web-j/root/etc/nginx/nginx.conf
+  - tests/fixtures/hosts/web-j/root/etc/nginx/sites-available/shop
+  - tests/fixtures/hosts/web-j/root/etc/nginx/sites-enabled/blog
+  - tests/fixtures/hosts/web-j/root/etc/nginx/sites-enabled/shop
+  - tests/fixtures/hosts/web-j/root/etc/nginx/sites-enabled/static
+  - tests/fixtures/hosts/web-j/root/etc/os-release
+  - tests/fixtures/hosts/web-j/root/etc/php/8.3/fpm/php-fpm.conf
+  - tests/fixtures/hosts/web-j/root/etc/php/8.3/fpm/pool.d/legacy.conf
+  - tests/fixtures/hosts/web-j/root/etc/php/8.3/fpm/pool.d/www.conf
+  - tests/fixtures/hosts/web-j/root/etc/php/8.4/fpm/pool.d/www.conf
+  - tests/fixtures/hosts/web-j/root/var/lib/apt/lists/ppa.launchpadcontent.net_ondrej_php_ubuntu_dists_noble_InRelease
+  - tests/fixtures/hosts/web-j/started.txt
+  - tests/fixtures/hosts/web-k/active.txt
+  - tests/fixtures/hosts/web-k/dpkg-query.txt
+  - tests/fixtures/hosts/web-k/root/etc/nginx/nginx.conf
+  - tests/fixtures/hosts/web-k/root/etc/nginx/sites-enabled/front
+  - tests/fixtures/hosts/web-k/root/etc/os-release
+  - tests/fixtures/hosts/web-k/root/etc/php/8.3/fpm/pool.d/api.conf
+  - tests/fixtures/hosts/web-k/root/etc/php/8.3/fpm/pool.d/www.conf
+  - tests/fixtures/hosts/web-m/active.txt
+  - tests/fixtures/hosts/web-m/debs/php8.3-common=8.3.6-0ubuntu0.24.04.13/changelog.Debian
+  - tests/fixtures/hosts/web-m/dpkg-query.txt
+  - tests/fixtures/hosts/web-m/http.txt
+  - tests/fixtures/hosts/web-m/madison/php8.3-fpm.txt
+  - tests/fixtures/hosts/web-m/madison/php8.5-fpm.txt
+  - tests/fixtures/hosts/web-m/root/etc/nginx/nginx.conf
+  - tests/fixtures/hosts/web-m/root/etc/nginx/sites-enabled/shop
+  - tests/fixtures/hosts/web-m/root/etc/os-release
+  - tests/fixtures/hosts/web-m/root/etc/php/8.3/fpm/conf.d/10-opcache.ini
+  - tests/fixtures/hosts/web-m/root/etc/php/8.3/fpm/pool.d/www.conf
+  - tests/fixtures/hosts/web-m/root/etc/php/8.5/fpm/conf.d/10-opcache.ini
+  - tests/fixtures/hosts/web-m/root/etc/php/8.5/fpm/pool.d/www.conf
+  - tests/fixtures/hosts/web-m/root/usr/share/doc/php8.3-common/changelog.Debian
+  - tests/fixtures/hosts/web-m/root/usr/share/doc/php8.5-common/changelog.Debian
+  - tests/fixtures/hosts/web-n/active.txt
+  - tests/fixtures/hosts/web-n/debs/php8.4-common=8.4.20-1+ubuntu24.04.1+deb.sury.org+1/changelog.Debian
+  - tests/fixtures/hosts/web-n/dpkg-query.txt
+  - tests/fixtures/hosts/web-n/madison/php8.4-fpm.txt
+  - tests/fixtures/hosts/web-n/madison/php8.5-fpm.txt
+  - tests/fixtures/hosts/web-n/root/etc/os-release
+  - tests/fixtures/hosts/web-n/root/etc/php/8.4/fpm/conf.d/10-opcache.ini
+  - tests/fixtures/hosts/web-n/root/etc/php/8.4/fpm/pool.d/www.conf
+  - tests/fixtures/hosts/web-n/root/etc/php/8.5/fpm/conf.d/10-opcache.ini
+  - tests/fixtures/hosts/web-n/root/etc/php/8.5/fpm/pool.d/www.conf
+  - tests/fixtures/hosts/web-n/root/usr/share/doc/php8.4-common/changelog.Debian
+  - tests/fixtures/hosts/web-n/root/usr/share/doc/php8.5-common/changelog.Debian
+  - tests/fixtures/logs/all-good-audit-20261026T090000.000Z.log
+  - tests/fixtures/logs/blocked-audit-20261026T090000.000Z.log
+  - tests/fixtures/logs/blocked-ensure-20261026T100000.000Z.log
+  - tests/fixtures/logs/down-audit-20261026T090000.000Z.log
+  - tests/fixtures/logs/fix-ok-audit-20261026T090000.000Z.log
+  - tests/fixtures/logs/fix-ok-fix-20261026T100000.000Z.log
+  - tests/fixtures/logs/fix-partial-audit-20261026T090000.000Z.log
+  - tests/fixtures/logs/fix-partial-fix-20261026T100000.000Z.log
+  - tests/fixtures/logs/hook-missing-audit-20261026T090000.000Z.log
+  - tests/fixtures/logs/needs-ensure-audit-20261026T090000.000Z.log
+  - tests/fixtures/logs/needs-fix-audit-20261026T090000.000Z.log
+  - tests/fixtures/logs/needs-restart-audit-20261026T090000.000Z.log
+  - tests/fixtures/logs/never-audited-ensure-20261026T100000.000Z.log
+  - tests/fixtures/logs/resumed-audit-20261025T090000.000Z.log
+  - tests/fixtures/logs/resumed-audit-20261026T090000.000Z.log
+  - tests/fixtures/logs/stale-ensure-audit-20261026T090000.000Z.log
+  - tests/fixtures/logs/stale-ensure-ensure-20261025T100000.000Z.log
+  - tests/fixtures/logs/verify-audit-20261026T090000.000Z.log
+  - tests/fixtures/logs/verify-ensure-20261026T100000.000Z.log
+  - tests/run.sh
+ended_at: "2026-10-26T11:31:28Z"
+status: active
+git:
+  repo_root: /home/alexturik/ALEXTURIK_DEV/CC_PLUGINS_BY_ALEXTURIK/php2shell-fixer
+  branch: 8-apt-hook
+  parent_branch: main
+  base_sha: 9bba062b253707c6b7b9742e54f18bd94eb41340
+  head_sha: c4713dfd4485ce02baa56026bf03c20fe57d11d9
+  commits_sha:
+    - 7c594f57c812fbd15d7ce5add5ce1d2b405ff141
+    - 5ab7b3888578013fd25f7ff507847d29989c4147
+    - 1e4de26490516c5358214d7900541f5c595a302c
+    - 4edbcb3afb9c85312b33e6932c0016f3bc1ce4e3
+    - 044b143a5cbba2ee704316fd37b4a61556c78172
+    - e1de3b117705829fcc0838f2ab8e21b0a7bf5af5
+    - eef6509fcdd347347109b4b396386ae23f9a4973
+    - d34cd5db6475dadc19197633c2ed09de07070968
+    - adef54baeb565524e1ed0e13c265d8c4ec361078
+    - a1b8423f40cc417fa4bf851698d6fd5314b76d00
+    - e17ed68f373fccce4ee11173c2778b2a772b3268
+    - 52426a6a0302fc06a8a6f3df9326cdba980b742a
+    - 2667b8f0bef8592f0435c8a8afbca289f4bf8e36
+    - 43207c9a34c20b66134e6fe48f8877012a147cb4
+    - 0f7d27a0539efb6cc948438d528b5de35442ffa3
+    - 07f08bda9b73b921ae1baf9e6c16f17a5896d19e
+    - c4713dfd4485ce02baa56026bf03c20fe57d11d9
+  remote_url: https://github.com/turovskiy/php2shell-fixer.git
+  base_sha_orphan: false
+id: episode/php2shell-fixer-plugin-audit-ensure-fleet-detached-patcher
+created: "2026-10-26T11:31:28Z"
+updated: "2026-10-26T11:31:28Z"
+confidence: 0.58
+review: unreviewed
+tier: supporting
+summary: 'Goal: build the php2shell-fixer Claude Code plugin from an empty repo: agent-skills setup, PRD and tickets on GitHub, then implement tickets #2-#8 (audit, candidate target, ensure mitigation, host fac'
+---
+
+# php2shell-fixer plugin: audit, ensure, fleet, detached patcher, apt hook
+
+Goal: build the php2shell-fixer Claude Code plugin from an empty repo: agent-skills setup, PRD and tickets on GitHub, then implement tickets #2-#8 (audit, candidate target, ensure mitigation, host facts, fleet/resume, detached patcher, apt hook) with tests, PRs and merges. | What happened: setup wrote CLAUDE.md + docs/agents and created triage labels. PRD #1 drew on the earlier PHP2Shell incident scripts and three episodes; CVE-2026-115560 facts came from web search. Tickets #2-#10 were published with native sub-issue and blocked-by links. Each ticket went branch -> implementation -> bash test runner with stub binaries and fake roots -> mutation checks on a throwaway copy -> real read-only audit on one server -> PR with the pr skill -> merge with --match-head-commit (needs the full SHA). PRs #11-#16 merged; #8 is committed on its branch, not pushed. A real server was found still vulnerable (PPA PHP 8.2.30, not covered by unattended-upgrades) and patched by the owner. Side agents raised five valid points that changed the code: restart-after-upgrade, stale apt lists making "no fix" wrong, the SSH drop killing apt (led to systemd-run detachment in #7), PECL extensions with their own versions (filter by ${source:Package}), and mod_php hosts reported as done. | Outcome: partial - #2-#7 merged with tests and mutation checks (285 tests on main), #8 ready on its branch (304 tests), #9 and #10 open, mod_php guard awaiting the owner's decision. | Lessons: (1) Mutation checks found three tests that passed for the wrong reason: a drop simulation that killed only the shell and not its process group, an auto-accept that was masked by a later stop, and a pool "unused" rule with no fixture to exercise it. Run mutations for every safety rule before trusting green tests. (2) A stub must model the real failure mode: sshd sends SIGHUP to the whole session, so kill the process group in the stub. (3) A bash block whose redirection fails is skipped entirely: a hook with an unopenable log silently did nothing. (4) The program streamed through `ssh host 'bash -s'` arrives on stdin, so every command inside needs </dev/null, otherwise apt-get or a prompt eats the rest of the script; test it with stubs that drain stdin. (5) Shared cache dirs collect foreign files: a reader with a "--latest" mode must filter by its own naming scheme. (6) Generated scripts that rely on env vars for tests must export them; unexported vars do not reach child processes. (7) Public repo: keep fixtures and episodes free of client hosts and domains, and ignore session memos.
+
+## Related
+
+- [[project/php2shell-fixer]]
