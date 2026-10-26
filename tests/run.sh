@@ -532,6 +532,15 @@ has "$L" "kind=mitigation host=web-l branch=8.3 sapi=apache2 ini=absent action=i
 hasnt "$L" "sapi=cli" "web-l: CLI is not a web SAPI"
 hasnt "$L" "sapi=fpm" "web-l: no FPM on a mod_php-only host"
 
+Va=$(bash "$S/run.sh" audit web-v)
+has "$Va" "kind=branch host=web-v branch=7.4 sapi=apache2 installed=1:7.4.33-31+ubuntu24.04.1+deb.sury.org+1 origin=ppa active=not-loaded" \
+  "web-v: mod_php 7.4 installed but not loaded by Apache -> not-loaded"
+has "$Va" "branch=7.4 sapi=apache2 installed=1:7.4.33-31+ubuntu24.04.1+deb.sury.org+1" "web-v: 7.4 record present"
+has "$Va" "kind=override host=web-v branch=8.3 sapi=apache2 file=/etc/apache2/sites-enabled/shop.conf line=6 pool=- directive=php_admin_flag value=on enables=yes" \
+  "web-v: audit finds the Apache override through the sites-enabled symlink"
+has "$Va" "kind=mitigation host=web-v branch=8.3 sapi=apache2 ini=absent action=inspected upload_progress=On overrides=1 state=override" \
+  "web-v: audit reports the override state"
+
 echo "▸ audit: read-only"
 WRITES=$(grep -vE "$READ_ONLY" "$STUB_LOG")
 eq "$WRITES" "" "no write command or package operation in the stub log"
@@ -589,6 +598,27 @@ eq "$(ini web-i 8.3/fpm)" "" "web-i: new ini removed"
 eq "$(grep -E '^systemctl (reload|restart|stop) ' "$STUB_LOG")" "" "web-i: pool neither reloaded nor stopped"
 has "$I" "action=test-failed" "web-i: test failure recorded"
 has "$I" "ERROR: failed to load configuration file" "web-i: config test output shown"
+
+echo "▸ ensure: mod_php"
+: >"$STUB_LOG"
+V=$(bash "$S/run.sh" ensure web-v); code=$?
+eq "$code" 3 "web-v: Apache-level override -> exit 3"
+eq "$(ini web-v 8.3/apache2)" "$INI" "web-v: 8.3 apache2 ini written"
+eq "$(ini web-v 7.4/apache2)" "$INI" "web-v: ini written for an installed mod_php Apache does not load yet"
+eq "$(ini web-v 8.3/cli)" "" "web-v: CLI conf.d untouched"
+has "$V" "kind=override host=web-v branch=8.3 sapi=apache2 file=/etc/apache2/sites-enabled/shop.conf line=6 pool=- directive=php_admin_flag value=on enables=yes" \
+  "web-v: Apache override named with file and line"
+has "$V" "/etc/apache2/sites-enabled/shop.conf:6" "web-v: file and line in the human section too"
+has "$V" "kind=override host=web-v branch=8.3 sapi=apache2 file=/etc/apache2/conf-enabled/uploads.conf line=2 pool=- directive=php_value value=0 enables=no" \
+  "web-v: disabling override recorded, directive name in any case"
+hasnt "$V" "line=5 pool=-" "web-v: commented-out Apache override ignored"
+hasnt "$V" "old.conf" "web-v: a site that is not enabled is not scanned"
+has "$V" "kind=mitigation host=web-v branch=8.3 sapi=apache2 ini=absent action=written upload_progress=Off overrides=1 state=override" \
+  "web-v: ini Off but Apache re-enables it -> override"
+has "$V" "kind=mitigation host=web-v branch=7.4 sapi=apache2 ini=absent action=written-not-running upload_progress=Off overrides=0 state=mitigated" \
+  "web-v: 7.4 not loaded -> written, nothing reloaded for it, no Apache overrides counted"
+eq "$(grep -E '^systemctl (reload|restart|stop|start) ' "$STUB_LOG")" "systemctl reload apache2" "web-v: Apache reloaded once, nothing restarted"
+has "$V" "rm /etc/php/8.3/apache2/conf.d/99-security.ini && systemctl reload apache2" "web-v: rollback line reloads Apache"
 
 BEFORE_ROOT=$(fingerprint)
 NR=$(STUB_UID=1000 bash "$S/run.sh" ensure web-h); code=$?

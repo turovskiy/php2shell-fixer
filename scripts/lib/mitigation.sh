@@ -86,20 +86,47 @@ p2s_fpm_overrides() { # $1 branch
   done
 }
 
-# Inspect one SAPI and print its records: one "override" per pool override, then one "mitigation".
+# Apache-level overrides of session.upload_progress.enabled, in the same format as p2s_fpm_overrides with
+# pool "-". Apache reads them for mod_php only. Scans the files Debian's apache2.conf includes: apache2.conf
+# and *.conf in mods-enabled, conf-enabled and sites-enabled, read through their symlinks. Apache directive
+# names are case-insensitive; .htaccess files are not scanned.
+p2s_apache_overrides() {
+  local a f
+  a=$(p2s_path /etc/apache2)
+  for f in "$a/apache2.conf" "$a"/mods-enabled/*.conf "$a"/conf-enabled/*.conf "$a"/sites-enabled/*.conf; do
+    [ -f "$f" ] || continue
+    awk -v file="$f" '
+      tolower($1) ~ /^php_(admin_)?(value|flag)$/ && $2 == "session.upload_progress.enabled" {
+        value = $3; gsub(/"/, "", value)
+        enables = (tolower(value) ~ /^(1|on|true|yes)$/) ? "yes" : "no"
+        printf "%s|%d|-|%s|%s|%s\n", file, NR, tolower($1), value, enables
+      }' "$f"
+  done
+}
+
+# Overrides that apply to a SAPI: pool configs for FPM, Apache config for a mod_php Apache loads.
+p2s_overrides() { # $1 branch, $2 sapi
+  case $2 in
+    fpm) p2s_fpm_overrides "$1" ;;
+    apache2) if p2s_modphp_loaded "$1"; then p2s_apache_overrides; fi ;;
+  esac
+}
+
+# Inspect one SAPI and print its records: one "override" per pool or Apache override, then one "mitigation".
 # Sets P2S_MSTATE: mitigated | override | foreign | not-mitigated | unknown.
 # $1 host, $2 branch, $3 sapi, $4 ini owner (p2s_ini_owner), $5 what ensure did (inspected for an audit)
 p2s_mitigation_report() {
   local host=$1 branch=$2 sapi=$3 owner=$4 action=$5 value enabling=0 f l p d v e
   value=$(p2s_upload_progress "$branch" "$sapi")
-  if [ "$sapi" = fpm ]; then
-    while IFS='|' read -r f l p d v e; do
-      [ -n "$f" ] || continue
-      [ "$e" = yes ] && enabling=$((enabling + 1))
-      p2s_record kind=override host="$host" branch="$branch" sapi="$sapi" file="${f#"${P2S_ROOT:-}"}" line="$l" \
-        pool="$p" directive="$d" value="$v" enables="$e"
-    done <<<"$(p2s_fpm_overrides "$branch")"
-  fi
+  while IFS='|' read -r f l p d v e; do
+    [ -n "$f" ] || continue
+    if [ "$e" = yes ]; then
+      enabling=$((enabling + 1))
+      echo "php$branch $sapi: ${f#"${P2S_ROOT:-}"}:$l ($d $v) turns upload progress back on"
+    fi
+    p2s_record kind=override host="$host" branch="$branch" sapi="$sapi" file="${f#"${P2S_ROOT:-}"}" line="$l" \
+      pool="$p" directive="$d" value="$v" enables="$e"
+  done <<<"$(p2s_overrides "$branch" "$sapi")"
   if [ "$enabling" -gt 0 ]; then P2S_MSTATE=override
   elif [ "$owner" = foreign ]; then P2S_MSTATE=foreign
   elif [ "$value" = Off ]; then P2S_MSTATE=mitigated
@@ -130,11 +157,12 @@ p2s_config_ok() { # $1 branch, $2 sapi
 }
 
 # Put the mitigation in place for one SAPI and print its records. $1 host, $2 branch, $3 sapi, $4 reload
-# (yes: reload a running FPM pool whose ini changed; no: the caller restarts it).
+# (yes: reload a running FPM pool, or Apache loading the mod_php, whose ini changed; no: the caller restarts
+# it).
 # Uses the caller's P2S_RC (raised to 1 on a failed test or reload, to 3 when the SAPI is not mitigated)
 # and appends to the caller's P2S_ROLLBACK array. Sets P2S_EACTION and P2S_MSTATE.
 p2s_ensure_sapi() {
-  local host=$1 branch=$2 sapi=$3 reload=$4 dir ini owner had=no prev=""
+  local host=$1 branch=$2 sapi=$3 reload=$4 dir ini owner had=no prev="" unit
   dir=$(p2s_path "/etc/php/$branch/$sapi/conf.d")
   ini=$dir/99-security.ini
   owner=$(p2s_ini_owner "$ini")
@@ -150,16 +178,17 @@ p2s_ensure_sapi() {
     p2s_ini_content >"$ini"
     if p2s_config_ok "$branch" "$sapi"; then
       P2S_EACTION=written
-      if [ "$sapi" = fpm ]; then
+      unit=$(p2s_sapi_unit "$branch" "$sapi")
+      if [ -n "$unit" ]; then
         if [ "$reload" != yes ]; then
           :
-        elif [ "$(systemctl is-active "php$branch-fpm" </dev/null 2>/dev/null)" != active ]; then
+        elif ! p2s_sapi_running "$branch" "$sapi"; then
           P2S_EACTION=written-not-running
-        elif ! systemctl reload "php$branch-fpm" </dev/null; then
+        elif ! systemctl reload "$unit" </dev/null; then
           P2S_EACTION=reload-failed
           P2S_RC=1
         fi
-        P2S_ROLLBACK+=("rm ${ini#"${P2S_ROOT:-}"} && systemctl reload php$branch-fpm")
+        P2S_ROLLBACK+=("rm ${ini#"${P2S_ROOT:-}"} && systemctl reload $unit")
       else
         P2S_ROLLBACK+=("rm ${ini#"${P2S_ROOT:-}"}")
       fi
@@ -213,7 +242,8 @@ p2s_hook_script() {
   printf 'export P2S_ROOT=%q\n' "${P2S_ROOT:-}"
   declare -p P2S_SCHEMA P2S_INI_MARKER P2S_INI_LEGACY P2S_HOOK_LOG
   declare -f p2s_path p2s_record p2s_os p2s_ini_content p2s_ini_owner p2s_ini_disables p2s_sapi_unit \
-    p2s_modphp_loaded p2s_sapi_running p2s_php_apache2 p2s_upload_progress p2s_fpm_overrides p2s_mitigation_report \
+    p2s_modphp_loaded p2s_sapi_running p2s_php_apache2 p2s_upload_progress p2s_fpm_overrides p2s_apache_overrides \
+    p2s_overrides p2s_mitigation_report \
     p2s_web_sapis p2s_config_ok p2s_ensure_sapi p2s_hook_run
   echo 'export LC_ALL=C'
   echo 'p2s_hook_run'
