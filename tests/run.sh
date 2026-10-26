@@ -126,7 +126,9 @@ stub() { # stub <name> <body>: a logging stub
 # ssh [-o opt]... <host> 'bash -s': the host is the second-to-last argument. A host with a "sleep" file
 # waits that many seconds first, to exercise the per-host timeout. A host with a "drop-after" file loses the
 # connection after that many seconds: like sshd on a dropped session, the whole session's process group
-# gets SIGHUP and then SIGKILL, children included (255). Only what left the session survives.
+# gets SIGHUP and then SIGKILL, children included (255). Only what left the session survives. A host with an
+# "fsize-limit" file runs the program with files capped at that many KiB and SIGXFSZ ignored: a write past
+# the cap fails part-way with an error, as on a full disk (output goes through a pipe, which the cap spares).
 stub ssh 'h=${@: -2:1}
 d=$P2S_TEST_HOSTS/$h
 [ -d "$d" ] || { echo "ssh: Could not resolve hostname $h: Name or service not known" >&2; exit 255; }
@@ -138,6 +140,11 @@ if [ -f "$d/drop-after" ]; then
   kill -HUP -- "-$pid" 2>/dev/null; sleep 0.2; kill -9 -- "-$pid" 2>/dev/null
   echo "Connection to $h closed by remote host." >&2
   exit 255
+fi
+if [ -f "$d/fsize-limit" ]; then
+  set -o pipefail
+  (trap "" XFSZ; ulimit -f "$(cat "$d/fsize-limit")"; P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h exec bash -s) | cat
+  exit
 fi
 P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h exec bash -s'
 stub hostname 'echo "$STUB_HOST"'
@@ -532,6 +539,8 @@ echo "▸ verdict (installed build)"
 . "$S/lib/mitigation.sh"
 # shellcheck source=../scripts/lib/hostfacts.sh
 . "$S/lib/hostfacts.sh"
+# shellcheck source=../scripts/lib/pins.sh
+. "$S/lib/pins.sh"
 vd() { p2s_verdict "$1" "$2" "$(p2s_origin "$2")" "$3"; }
 eq "$(vd 8.3 8.3.6-0ubuntu0.24.04.12 no)" "unfixed below-threshold" "Ubuntu 8.3 .12 unfixed"
 eq "$(vd 8.3 8.3.6-0ubuntu0.24.04.13 yes)" "fixed distro-threshold" "Ubuntu 8.3 .13 fixed"
@@ -1304,6 +1313,36 @@ done
 eq "$(ls "$(y /etc/apt/preferences.d)") $(ls "$(y /etc/apt/apt.conf.d)")" "php2shell-php8.3.pref 51php2shell-ppa-origins" \
   "web-y over old files: no backup left where apt reads"
 has "$(cat "$(y $UUC)")" '"Example:noble"; "LP-PPA-ondrej-php:noble";' "web-y over old files: the old origin kept in the new entry"
+
+# The disk fills while the keeper writes its origin entry: the new content is a little over 1 KiB, the cap is
+# 1 KiB. The entry goes to a temp name apt skips and is moved into place only when whole, so the old entry
+# stays byte for byte and the temp file goes again.
+yreset
+mkdir -p "$(y /etc/apt/apt.conf.d)"
+{ printf 'Unattended-Upgrade::Allowed-Origins {'; for i in $(seq -w 1 40); do printf ' "Example-%s:noble";' "$i"; done; printf ' };\n'; } >"$(y $UUC)"
+cp "$(y $UUC)" "$WORK/uuc.before"
+echo 1 >"$WORK/hosts/web-y/fsize-limit"
+AF=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 1 "web-y disk full while writing the origin entry: exit 1"
+has "$AF" "kind=keeper host=web-y state=stopped reason=origin-write-failed" "web-y disk full while writing the origin entry: keeper record"
+cmp -s "$(y $UUC)" "$WORK/uuc.before" && ok "web-y disk full while writing the origin entry: the old entry byte for byte" \
+  || bad "web-y disk full while writing the origin entry: the old entry byte for byte" "$(cat "$(y $UUC)")"
+eq "$(ls "$(y /etc/apt/apt.conf.d)")" "51php2shell-ppa-origins" "web-y disk full while writing the origin entry: no temp file left"
+# The same for a pin file, through the writer the keeper uses for both.
+PW=$WORK/pinwrite
+mkdir -p "$PW/etc/apt/preferences.d"
+printf '%s\n' "$OLDPIN" >"$PW$PIN83"
+(trap '' XFSZ; ulimit -f 1; P2S_ROOT=$PW p2s_write_file "$PIN83" "$(printf '%2000s' '' | tr ' ' x)") 2>/dev/null; code=$?
+eq "$code" 1 "pin write on a full disk: fails"
+eq "$(cat "$PW$PIN83")" "$OLDPIN" "pin write on a full disk: the old pin unchanged"
+eq "$(ls "$PW/etc/apt/preferences.d")" "php2shell-php8.3.pref" "pin write on a full disk: no temp file left"
+# A temp pin left by a run that was killed mid-write is not a pin: apt skips its name, and so does the keeper.
+yreset
+mkdir -p "$(y /etc/apt/preferences.d)"
+p2s_pin_content 8.3 ppa.launchpadcontent.net >"$(y $PIN83).php2shell-new"
+AK=$(bash "$S/run.sh" autoupdate web-y); code=$?
+has "$AK" "kind=pin host=web-y branch=8.3 file=$PIN83 action=written" "web-y with a leftover temp pin: the pin is written, not taken as present"
+eq "$(ls "$(y /etc/apt/preferences.d)")" "php2shell-php8.3.pref" "web-y with a leftover temp pin: the temp file replaced"
 
 # The connection drops while the dry run judges the new origin entry: like sshd, the ssh stub sends the session
 # SIGHUP and then SIGKILL. The keeper puts the entry back as it was before it goes, so no unchecked entry stays.

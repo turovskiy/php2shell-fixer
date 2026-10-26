@@ -17,6 +17,31 @@ p2s_backup() { # $1 file; prints the backup's path, returns 1 when the copy fail
   mkdir -p "$(p2s_path "$P2S_BACKUP_DIR")" && cp -p "$(p2s_path "$1")" "$(p2s_path "$b")" && echo "$b"
 }
 
+# A keeper file is written whole or not at all: the content goes to <file>.php2shell-new beside it, a name apt
+# skips in both apt.conf.d (no extension or ".conf") and preferences.d (no extension or ".pref"), and mv puts
+# it in place. A write that fails part-way (a full disk) removes the temp file and leaves the file as it was:
+# a truncated apt.conf.d file would break every apt run. Like the apt hook's files.
+P2S_NEW_SUFFIX=.php2shell-new
+p2s_write_file() { # $1 file, $2 content (written with a final newline)
+  local f
+  f=$(p2s_path "$1")
+  if mkdir -p "${f%/*}" && printf '%s\n' "$2" >"$f$P2S_NEW_SUFFIX" && mv -f "$f$P2S_NEW_SUFFIX" "$f" </dev/null; then
+    return 0
+  fi
+  rm -f "$f$P2S_NEW_SUFFIX"
+  return 1
+}
+# Put a backup from p2s_backup back the same way. $1 backup, $2 file.
+p2s_restore_file() {
+  local f
+  f=$(p2s_path "$2")
+  if cp -p "$(p2s_path "$1")" "$f$P2S_NEW_SUFFIX" && mv -f "$f$P2S_NEW_SUFFIX" "$f" </dev/null; then
+    return 0
+  fi
+  rm -f "$f$P2S_NEW_SUFFIX"
+  return 1
+}
+
 # The PPA's PHP sources with what the cached Release file says about them, one "uri|suite|site|origin|label"
 # per line ("-" when apt has no cached Release file for the source). Origin and Label may hold spaces. Only
 # ondrej/php and packages.sury.org/php: the same people's nginx and Apache PPAs ship no PHP, and accepting
@@ -119,7 +144,7 @@ p2s_pin_existing() { # $1 site, $2 origin, $3 label, $4 suite, then the branch's
   local site=$1 origin=$2 label=$3 suite=$4 f pk pin pr pats p pkg covered
   shift 4
   for f in "$(p2s_path /etc/apt/preferences)" "$(p2s_path "$P2S_PIN_DIR")"/*; do
-    [ -f "$f" ] || continue
+    [ -f "$f" ] && [[ $f != *"$P2S_NEW_SUFFIX" ]] || continue   # a temp file left by a killed write
     while IFS=$'\t' read -r pk pin pr; do
       [[ $pr =~ ^-[0-9]+$ ]] && p2s_pin_targets "$pin" "$site" "$origin" "$label" "$suite" || continue
       read -ra pats <<<"$pk"

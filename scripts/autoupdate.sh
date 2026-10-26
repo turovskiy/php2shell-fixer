@@ -145,7 +145,7 @@ for b in $branches; do
     echo "STOP: could not back up $f to $P2S_BACKUP_DIR before overwriting it"
     au_end 1 state=stopped reason=backup-failed
   fi
-  if mkdir -p "${pf%/*}" && p2s_pin_content "$b" "${need[@]}" >"$pf"; then
+  if p2s_write_file "$f" "$(p2s_pin_content "$b" "${need[@]}")"; then
     b_pin[$b]=$f
     p2s_record kind=pin host="$host" branch="$b" file="$f" action=written
     echo "php$b: pinned off the PPA (${need[*]}) in $f"
@@ -250,7 +250,8 @@ if [ ${#need[@]} -gt 0 ]; then
   # puts the file back as it was first, then reports; SIGPIPE is ignored, the session's output being gone.
   au_interrupted() {
     trap '' PIPE
-    if [ -n "$ubk" ]; then cp -p "$(p2s_path "$ubk")" "$uc"; else rm -f "$uc"; fi
+    rm -f "$uc$P2S_NEW_SUFFIX"
+    if [ -n "$ubk" ]; then p2s_restore_file "$ubk" "$P2S_UU_CONF"; else rm -f "$uc"; fi
     for e in "${need[@]}"; do
       p2s_record kind=uu_entry host="$host" value="$(p2s_enc "$e")" file="$P2S_UU_CONF" action=removed
     done
@@ -259,14 +260,14 @@ if [ ${#need[@]} -gt 0 ]; then
     exit 1
   }
   trap au_interrupted HUP INT TERM
-  if mkdir -p "${uc%/*}" && {
+  if p2s_write_file "$P2S_UU_CONF" "$(
     echo '// Managed by php2shell-fixer: unattended-upgrades installs updates from the ondrej/sury PPA.'
     echo "// Distro-built PHP branches are pinned off the PPA in $P2S_PIN_DIR/php2shell-php<X.Y>.pref."
     echo "// Rollback: rm $P2S_UU_CONF"
     printf 'Unattended-Upgrade::Allowed-Origins {'
     printf ' "%s";' "${write[@]}"
-    printf ' };\n'
-  } >"$uc"; then
+    printf ' };'
+  )"; then
     uwrote=yes
     for e in "${need[@]}"; do
       p2s_record kind=uu_entry host="$host" value="$(p2s_enc "$e")" file="$P2S_UU_CONF" action=written
@@ -321,7 +322,7 @@ if [ "$result" != ok ]; then
   why="the dry run does not accept the PPA origin"
   [ "$result" != distro-from-ppa ] || why="with the PPA origin accepted, unattended-upgrades would upgrade ${from_ppa[*]} of a distro-built branch from the PPA"
   if [ "$uwrote" = yes ]; then
-    if [ -n "$ubk" ]; then cp -p "$(p2s_path "$ubk")" "$uc"; else rm -f "$uc"; fi
+    if [ -n "$ubk" ]; then p2s_restore_file "$ubk" "$P2S_UU_CONF"; else rm -f "$uc"; fi
     unset 'P2S_ROLLBACK[-1]'
     for e in "${need[@]}"; do
       p2s_record kind=uu_entry host="$host" value="$(p2s_enc "$e")" file="$P2S_UU_CONF" action=removed
