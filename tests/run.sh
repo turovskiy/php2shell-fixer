@@ -1156,6 +1156,23 @@ has "$AI" "candidate=$SU835 candidate_origin=ppa moved=php8.3-fpm,php8.3-common 
 has "$AI" "mv /etc/apt/preferences.d/ondrej-php.conf /etc/apt/preferences.d/ondrej-php.pref" "web-y ignored pin: says how to make apt read it"
 [ -e "$(y $UUC)" ] && bad "web-y ignored pin: no origin entry" || ok "web-y ignored pin: no origin entry"
 
+# The same ignored pin while the PPA's 8.3 build sorts below Ubuntu's: the candidate stays the installed build
+# today, but the pin still holds nothing and the next PPA upload would move 8.3. apt-cache policy shows the PPA
+# build at its source's priority instead of -1, and that is what the keeper reads.
+yreset
+mkdir -p "$(y /etc/apt/preferences.d)"
+printf 'Package: php8.3*\nPin: origin ppa.launchpadcontent.net\nPin-Priority: -1\n' >"$(y /etc/apt/preferences.d/ondrej-php.conf)"
+sed -i "s/$SU835/8.3.5-1+ubuntu24.04.1+deb.sury.org+1/" "$WORK/hosts/web-y/madison/php8.3-fpm.txt" "$WORK/hosts/web-y/madison/php8.3-common.txt"
+AJ=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 1 "web-y ignored pin, PPA build lower: exit 1"
+has "$AJ" "candidate=$U83 candidate_origin=distro moved=- pin=/etc/apt/preferences.d/ondrej-php.conf state=pin-ineffective" \
+  "web-y ignored pin, PPA build lower: still detected as ineffective"
+has "$AJ" "unheld=php8.3-fpm,php8.3-common" "web-y ignored pin, PPA build lower: names the packages whose PPA builds keep a priority"
+has "$AJ" "mv /etc/apt/preferences.d/ondrej-php.conf /etc/apt/preferences.d/ondrej-php.pref" "web-y ignored pin, PPA build lower: says how to make apt read it"
+[ -e "$(y $UUC)" ] && bad "web-y ignored pin, PPA build lower: no origin entry" || ok "web-y ignored pin, PPA build lower: no origin entry"
+has "$(bash "$S/report.sh" "$(sed -n 's/^log: //p' <<<"$AJ")")" '**pin-ineffective**: PPA builds of php8.3-fpm,php8.3-common not held off' \
+  "report: a pin that holds nothing yet, though nothing would move today"
+
 # Equivalent config already in place under other names, in other forms: nothing written.
 yreset
 mkdir -p "$(y /etc/apt/preferences.d)" "$(y /etc/apt/apt.conf.d)"

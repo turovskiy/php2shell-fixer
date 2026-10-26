@@ -239,7 +239,10 @@ while IFS=$'\t' read -r _ _ _ log; do
       policy)
         case ${r[state]} in
           kept) ks=kept ;;
-          *) ks="**${r[state]}**: ${r[moved]} would move" ;;
+          *)
+            if [ "${r[moved]}" != - ] || [ "${r[unheld]:--}" = - ]; then ks="**${r[state]}**: ${r[moved]} would move"
+            else ks="**${r[state]}**: PPA builds of ${r[unheld]} not held off"
+            fi ;;
         esac
         pn=${r[pin]}
         [ "$pn" = - ] || pn="\`$pn\`"
