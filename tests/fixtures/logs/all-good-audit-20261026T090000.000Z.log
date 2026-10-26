@@ -1,0 +1,5 @@
+@p2s schema=1 kind=run target=all-good mode=audit started=20261026T090000.000Z
+@p2s schema=1 kind=host host=all-good os=ubuntu-24.04
+@p2s schema=1 kind=branch host=all-good branch=8.2 sapi=fpm verdict=fixed restart=ok
+@p2s schema=1 kind=mitigation host=all-good branch=8.2 sapi=fpm state=mitigated
+@p2s schema=1 kind=run_end target=all-good mode=audit exit=0 status=ok

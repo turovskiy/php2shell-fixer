@@ -1,0 +1,5 @@
+@p2s schema=1 kind=run target=blocked mode=ensure started=20261026T100000.000Z
+@p2s schema=1 kind=host host=blocked os=ubuntu-24.04
+@p2s schema=1 kind=override host=blocked branch=8.3 sapi=fpm file=/etc/php/8.3/fpm/pool.d/www.conf line=6 pool=www directive=php_admin_flag value=on enables=yes
+@p2s schema=1 kind=mitigation host=blocked branch=8.3 sapi=fpm state=override
+@p2s schema=1 kind=run_end target=blocked mode=ensure exit=3 status=exit-3

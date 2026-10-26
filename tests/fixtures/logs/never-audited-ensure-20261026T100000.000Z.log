@@ -1,0 +1,4 @@
+@p2s schema=1 kind=run target=never-audited mode=ensure started=20261026T100000.000Z
+@p2s schema=1 kind=host host=never-audited os=ubuntu-24.04
+@p2s schema=1 kind=mitigation host=never-audited branch=8.3 sapi=fpm state=mitigated
+@p2s schema=1 kind=run_end target=never-audited mode=ensure exit=0 status=ok
