@@ -1,0 +1,3 @@
+@p2s schema=1 kind=run target=down mode=audit started=20261026T090000.000Z
+ssh: connect to host down port 22: Connection timed out
+@p2s schema=1 kind=run_end target=down mode=audit exit=255 status=unreachable

@@ -39,6 +39,19 @@ Under the tables the report lists host facts that help decide how to patch: whic
 
 The target comes from the package lists already on the server: the audit only reads, so it never runs `apt-get update`. "none" means the server's lists hold no fixed build, not that no fix exists. When the report marks the lists as older than the fixes, run `apt-get update` on the server and audit again before you decide anything.
 
+## Many servers, and picking up where you left off
+
+`run.sh` takes several hosts at once: `bash scripts/run.sh audit <host1> <host2> <host3>`. Each host gets its own log in `~/.cache/php2shell`, so the logs survive a closed session or a reboot. A host that does not answer is marked unreachable and the run moves on to the next one.
+
+Two commands read those logs later:
+
+```
+bash scripts/report.sh --latest   # the newest log per server, one report
+bash scripts/next.sh --latest     # what to do next on each server: audit, fix, ensure, verify or done
+```
+
+Write commands (`ensure`) are never cut off by a time limit, even if a server is slow: a session killed in the middle of apt or a reload leaves the server half changed. Only the read-only audit has a limit (10 minutes per server by default). A dropped connection is another matter: if your laptop sleeps or the network goes, the server most likely stops the command where it was. For `ensure` that is harmless (run it again), but keep the connection up until it finishes.
+
 ## Keep the mitigation in place
 
 CVE-2026-115560 has no fix yet. Until PHP ships one, the protection is `session.upload_progress.enabled = 0` in every web SAPI (PHP-FPM and PHP-CGI). This command puts it in place and keeps it there:

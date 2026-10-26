@@ -39,6 +39,9 @@ mkdir -p "$(dirname "$TOP")"
   for i in $(seq 1 2000); do echo "  * Older entry $i: backported upstream fix for the 8.1 branch, no security impact"; done
 } >"$TOP"
 find "$WORK/hosts" -name changelog.Debian -exec gzip -n {} \;
+# web-z: a CLI-only host that answers slowly, for the per-host timeout.
+cp -r "$WORK/hosts/web-c" "$WORK/hosts/web-z"
+echo 3 >"$WORK/hosts/web-z/sleep"
 # Candidate packages: debs/<package>=<version>/ becomes the tar that "dpkg-deb --fsys-tarfile" would print.
 # apt lists: names as apt writes them, dates set here since git keeps no mtimes. web-a has none at all.
 lists() { # lists <host> <date> <list file>...
@@ -86,14 +89,18 @@ done
 # Stubs, first on PATH. ssh runs the streamed program locally against the named host's fake root.
 REAL_DPKG=$(command -v dpkg)
 mkdir -p "$WORK/bin"
-export STUB_LOG=$WORK/calls.log P2S_TEST_HOSTS=$WORK/hosts P2S_CACHE=$WORK/cache
+export STUB_LOG=$WORK/calls.log P2S_TEST_HOSTS=$WORK/hosts P2S_CACHE=$WORK/cache P2S_ALLOW_TMP_CACHE=1
 stub() { # stub <name> <body>: a logging stub
   printf '#!/usr/bin/env bash\necho "%s $*" >>"$STUB_LOG"\n%s\n' "$1" "$2" >"$WORK/bin/$1"
   chmod +x "$WORK/bin/$1"
 }
-stub ssh 'd=$P2S_TEST_HOSTS/$1
-[ -d "$d" ] || { echo "ssh: Could not resolve hostname $1: Name or service not known" >&2; exit 255; }
-P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$1 exec bash -s'
+# ssh [-o opt]... <host> 'bash -s': the host is the second-to-last argument. A host with a "sleep" file
+# waits that many seconds first, to exercise the per-host timeout.
+stub ssh 'h=${@: -2:1}
+d=$P2S_TEST_HOSTS/$h
+[ -d "$d" ] || { echo "ssh: Could not resolve hostname $h: Name or service not known" >&2; exit 255; }
+[ -f "$d/sleep" ] && sleep "$(cat "$d/sleep")"
+P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h exec bash -s'
 stub hostname 'echo "$STUB_HOST"'
 stub dpkg-query 'cat "$P2S_STUB/dpkg-query.txt"'
 stub systemctl 'if [ "$1" = is-active ]; then
@@ -164,7 +171,7 @@ export TMPDIR=$WORK/hosttmp
 mkdir -p "$TMPDIR"
 
 # Calls an audit may make; anything else in the stub log is a write or a package operation.
-READ_ONLY='^(ssh [^ ]+ bash -s|hostname ?|dpkg-query .*|systemctl is-active [^ ]+|systemctl show -p ActiveEnterTimestamp --value [^ ]+|dpkg --compare-versions .*|apt-cache madison [^ ]+|apt-get download -q [^ ]+|dpkg-deb --fsys-tarfile [^ ]+|php-(fpm|cgi)[0-9.]+ -i|apt-mark showhold|apt-config dump|nginx -T|apt-helper .* download-file [^ ]+ [^ ]+)$'
+READ_ONLY='^(ssh (-o [^ ]+ )*[^ ]+ bash -s|hostname ?|dpkg-query .*|systemctl is-active [^ ]+|systemctl show -p ActiveEnterTimestamp --value [^ ]+|dpkg --compare-versions .*|apt-cache madison [^ ]+|apt-get download -q [^ ]+|dpkg-deb --fsys-tarfile [^ ]+|php-(fpm|cgi)[0-9.]+ -i|apt-mark showhold|apt-config dump|nginx -T|apt-helper .* download-file [^ ]+ [^ ]+)$'
 fingerprint() { (cd "$WORK/hosts" && find . -type f -exec md5sum {} + | sort); }
 
 echo "▸ verdict (installed build)"
@@ -458,6 +465,67 @@ eq "$code" 2 "unknown mode: exit 2"
 bash "$S/run.sh" >/dev/null 2>&1; code=$?
 eq "$code" 2 "no arguments: exit 2"
 
+echo "▸ fleet"
+FL=$WORK/fleet
+: >"$STUB_LOG"
+O=$(P2S_CACHE=$FL bash "$S/run.sh" audit web-a web-b no-such-host 2>/dev/null); code=$?
+eq "$code" 255 "fleet: overall exit is the worst host's (unreachable 255)"
+has "$O" "######## summary" "fleet: summary printed"
+has "$O" "no-such-host: exit 255" "fleet: unreachable host listed, run went on"
+eq "$(ls "$FL" | wc -l)" 3 "fleet: one log per host"
+eq "$(grep -l 'kind=host ' "$FL"/*.log | wc -l)" 2 "fleet: two logs with host records"
+has "$(cat "$FL"/no-such-host-audit-*.log)" "kind=run_end target=no-such-host mode=audit exit=255 status=unreachable" "fleet: unreachable recorded in its log"
+has "$(cat "$FL"/web-a-audit-*.log)" "kind=run_end target=web-a mode=audit exit=0 status=ok" "fleet: run_end closes a good log"
+has "$(head -1 "$FL"/web-b-audit-*.log)" "@p2s schema=1 kind=run target=web-b mode=audit started=" "fleet: run record opens the log"
+has "$(cat "$STUB_LOG")" "ssh -o BatchMode=yes -o ConnectTimeout=10 web-a bash -s" "fleet: BatchMode and connect timeout"
+FIRST_A=$(basename "$(ls "$FL"/web-a-audit-*.log)")
+P2S_CACHE=$FL bash "$S/run.sh" audit web-a >/dev/null 2>&1
+NEWEST_A=$(basename "$(ls "$FL"/web-a-audit-*.log | sort | tail -1)")
+[ "$FIRST_A" != "$NEWEST_A" ] && ok "fleet: second web-a audit has its own log" || bad "fleet: second web-a audit has its own log"
+# Hand-written logs from before the plugin share the cache dir; --latest leaves them out.
+printf 'some old notes\n' >"$FL/run-old.log"
+printf 'ssh output\n' >"$FL/audit-somehost.log"
+FR=$(P2S_CACHE=$FL bash "$S/report.sh" --latest 2>&1)
+hasnt "$FR" "no host record" "report --latest: hand-written logs in the cache dir ignored"
+hasnt "$(P2S_CACHE=$FL bash "$S/next.sh" --latest)" "run-old" "next --latest: hand-written logs ignored"
+has "$FR" "Log: \`$NEWEST_A\`" "report --latest: newest web-a log"
+hasnt "$FR" "Log: \`$FIRST_A\`" "report --latest: older web-a log ignored"
+eq "$(grep -c '^## web-a ' <<<"$FR")" 1 "report --latest: one web-a section"
+has "$FR" "## no-such-host (exit 255 (unreachable))" "report --latest: unreachable host has its section"
+has "$FR" "Run: audit, started " "report: run line"
+
+Z=$(P2S_CACHE=$FL P2S_HOST_TIMEOUT=1 bash "$S/run.sh" audit web-z 2>/dev/null); code=$?
+eq "$code" 124 "timeout: a slow audit is cut off (124)"
+has "$Z" "status=timeout" "timeout: recorded"
+Z2=$(P2S_CACHE=$FL P2S_HOST_TIMEOUT=1 bash "$S/run.sh" ensure web-z 2>/dev/null); code=$?
+eq "$code" 0 "timeout: a write mode is never cut off"
+has "$Z2" "kind=run_end target=web-z mode=ensure exit=0 status=ok" "timeout: ensure ran to its end"
+
+D1=$(env -u P2S_CACHE -u XDG_CACHE_HOME HOME="$WORK/home" bash "$S/run.sh" audit web-c 2>&1)
+has "$D1" "log: $WORK/home/.cache/php2shell/web-c-audit-" "logs default to ~/.cache/php2shell, outside /tmp"
+TMPC=/tmp/p2s-warn-test-$$
+W=$(env -u P2S_ALLOW_TMP_CACHE P2S_CACHE="$TMPC" bash "$S/run.sh" audit web-c 2>&1 >/dev/null)
+rm -rf "$TMPC"
+has "$W" "may not survive a reboot" "cache dir under /tmp: warning"
+
+echo "▸ next step"
+NX=$(bash "$S/next.sh" "$T"/fixtures/logs/*.log); code=$?
+eq "$code" 0 "next: exit 0"
+has "$NX" "needs-fix: fix - unfixed: php8.4" "next: unfixed -> fix"
+has "$NX" "needs-restart: fix - restart needed: php8.3" "next: restart needed -> fix"
+has "$NX" "needs-ensure: ensure - not mitigated: 8.3/cgi:not-mitigated" "next: fixed but mitigation missing -> ensure"
+has "$NX" "all-good: done - " "next: all good -> done"
+has "$NX" "down: audit - last audit: unreachable" "next: unreachable -> audit again"
+has "$NX" "resumed: done - " "next: newest audit wins over an older one"
+has "$NX" "verify: verify - ensure finished after the last audit" "next: write after the audit -> verify"
+has "$NX" "blocked: ensure - last ensure: exit-3, not mitigated: 8.3/fpm:override, pool override: /etc/php/8.3/fpm/pool.d/www.conf:6 (the operator removes it)" \
+  "next: failed ensure names the blocker"
+has "$NX" "stale-ensure: ensure - not mitigated" "next: an ensure older than the audit does not count"
+has "$NX" "never-audited: audit - no audit yet" "next: no audit -> audit"
+eq "$(wc -l <<<"$NX")" 10 "next: one line per host"
+bash "$S/next.sh" >/dev/null 2>&1; code=$?
+eq "$code" 2 "next: no arguments -> exit 2"
+
 echo "▸ report"
 rm -rf "$WORK/hosts"   # the report must work from saved logs alone
 LOGS=$(ls "$P2S_CACHE"/web-[abcd]-audit-*.log)
@@ -498,10 +566,15 @@ hasnt "$R" "== php2shell audit" "report: human section of the log not copied"
 
 bash "$S/report.sh" "$WORK/missing.log" >/dev/null 2>&1; code=$?
 eq "$code" 1 "report: unreadable log -> exit 1"
-LOG_X=$(ls "$P2S_CACHE"/no-such-host-audit-*.log)
-E=$(bash "$S/report.sh" "$LOG_X" 2>&1 >/dev/null); code=$?
-eq "$code" 1 "report: log without a host record -> exit 1"
+printf 'some text, no records\n' >"$WORK/norecords.log"
+E=$(bash "$S/report.sh" "$WORK/norecords.log" 2>&1 >/dev/null); code=$?
+eq "$code" 1 "report: log with neither a host nor a run record -> exit 1"
 has "$E" "no host record" "report: says why"
+LOG_X=$(ls "$P2S_CACHE"/no-such-host-audit-*.log)
+X=$(bash "$S/report.sh" "$LOG_X"); code=$?
+eq "$code" 0 "report: unreachable host is a section, not an error"
+has "$X" "## no-such-host (exit 255 (unreachable))" "report: unreachable section"
+has "$X" 'Last output: `ssh: Could not resolve hostname no-such-host: Name or service not known`' "report: ssh's own error shown"
 printf '@p2s schema=9 kind=host host=future os=x\n' >"$WORK/future.log"
 E=$(bash "$S/report.sh" "$WORK/future.log" 2>&1 >/dev/null)
 has "$E" "schema 9" "report: unknown schema skipped with a warning"

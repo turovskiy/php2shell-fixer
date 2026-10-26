@@ -2,18 +2,33 @@
 # Renders saved run logs as a markdown report, one section per host: a table of PHP-FPM branches (audit),
 # a table of the upload_progress mitigation per web SAPI (audit and ensure) with overrides below it, and
 # the host facts (audit): sites and pools, held packages, PPA sources, unattended-upgrades.
-# Reads only the "@p2s" records, so the report says exactly what the logged run found.
-# Usage: report.sh <log>...
-# Exit:  0; 1 when a log is unreadable or holds no host record; 2 on bad usage.
+# Reads only the "@p2s" records, so the report says exactly what the logged run found. Of several logs for
+# one host and mode, only the newest counts; a host the run could not reach gets a section saying so.
+# Usage: report.sh --latest     every run.sh log in ${P2S_CACHE:-$XDG_CACHE_HOME/php2shell}
+#        report.sh <log>...
+# Exit:  0; 1 when a log is unreadable or holds neither a host nor a run record; 2 on bad usage.
 set -uo pipefail
 
-[ $# -gt 0 ] || { echo "usage: report.sh <log>..." >&2; exit 2; }
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=lib/logs.sh
+. "$HERE/lib/logs.sh"
+CACHE=${P2S_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/php2shell}
+
+case ${1:-} in
+  '') echo "usage: report.sh --latest | report.sh <log>..." >&2; exit 2 ;;
+  --latest) mapfile -t logs < <(p2s_cache_logs "$CACHE") ;;
+  *) logs=("$@") ;;
+esac
 
 rc=0
+for log in "${logs[@]}"; do
+  [ -r "$log" ] || { echo "unreadable log: $log" >&2; rc=1; }
+done
 branches=() mitigations=() overrides=() sites=() pools=() holds=() sources=() origins=() facts=()
 dec() { local v=${1//%20/ }; echo "${v//%25/%}"; }   # values were encoded with p2s_enc
 flush() { # print the current host section
   [ -n "${cur_host:-}" ] || return 0
+  [ -z "${run_mode:-}" ] || printf 'Run: %s, started %s, %s\n\n' "$run_mode" "$run_started" "${run_status:-no end record}"
   if [ ${#branches[@]} -gt 0 ]; then
     echo '| Branch | SAPI | Installed | Origin | Service | Restart | CVEs in changelog | Verdict | Reason | Target | apt lists |'
     echo '|---|---|---|---|---|---|---|---|---|---|---|'
@@ -58,14 +73,10 @@ flush() { # print the current host section
 }
 
 echo "# PHP2Shell report"
-for log in "$@"; do
-  if [ ! -r "$log" ]; then
-    echo "unreadable log: $log" >&2
-    rc=1
-    continue
-  fi
+while IFS=$'\t' read -r _ _ _ log; do
+  [ -n "$log" ] || continue
   hosts=0
-  cur_host=""
+  cur_host="" run_mode="" run_started="" run_status="" run_target=""
   while IFS= read -r line; do
     [[ $line == '@p2s '* ]] || continue
     declare -A r=()
@@ -77,6 +88,12 @@ for log in "$@"; do
       continue
     fi
     case ${r[kind]:-} in
+      run)
+        run_target=${r[target]} run_mode=${r[mode]} run_started=${r[started]}
+        ;;
+      run_end)
+        run_status="exit ${r[exit]} (${r[status]})"
+        ;;
       host)
         flush
         cur_host=${r[host]}
@@ -152,10 +169,14 @@ for log in "$@"; do
     esac
     unset r
   done <"$log"
-  flush
-  if [ "$hosts" -eq 0 ]; then
+  if [ "$hosts" -eq 0 ] && [ -n "$run_target" ]; then
+    # The run never reached the host: say so, with ssh's own last word.
+    printf '\n## %s (%s)\n\nLog: `%s`\n\n' "$run_target" "${run_status:-no end record}" "$(basename "$log")"
+    printf 'Run: %s, started %s. Last output: `%s`\n' "$run_mode" "$run_started" "$(grep -v '^@p2s ' "$log" | tail -1)"
+  elif [ "$hosts" -eq 0 ]; then
     echo "no host record in $log (did the run reach the host?)" >&2
     rc=1
   fi
-done
+  flush
+done < <(p2s_newest_logs "${logs[@]}")
 exit "$rc"
