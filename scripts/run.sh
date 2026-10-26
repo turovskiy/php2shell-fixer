@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Local runner. Streams a mode's scripts to a host as one bash program over ssh, so nothing is copied
 # to the server, and saves the output to a log that report.sh reads.
-# Usage: run.sh audit <host>     host: an ssh alias or user@address
-#        run.sh bundle <mode>    print the stream for <mode> (what ssh would receive)
-# Logs:  ${P2S_CACHE:-$XDG_CACHE_HOME/php2shell}/<host>-<mode>-<UTC stamp>.log
+# Usage: run.sh audit|ensure <host>   host: an ssh alias or user@address; ensure writes, audit only reads
+#        run.sh bundle <mode>         print the stream for <mode> (what ssh would receive)
+# Logs:  ${P2S_CACHE:-$XDG_CACHE_HOME/php2shell}/<host>-<mode>-<UTC stamp with ms>.log
 # Exit:  the remote program's exit code (ssh's own failures are 255); 2 on bad usage.
 set -uo pipefail
 
@@ -17,7 +17,7 @@ usage() {
 
 bundle() {
   case $1 in
-    audit) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/audit.sh" ;;
+    audit | ensure) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/mitigation.sh" "$HERE/$1.sh" ;;
     *) echo "unknown mode: $1" >&2; return 2 ;;
   esac
 }
@@ -27,11 +27,14 @@ case ${1:-} in
     [ $# -eq 2 ] || usage
     bundle "$2"
     ;;
-  audit)
+  audit | ensure)
     [ $# -eq 2 ] || usage
     mode=$1 host=$2
     mkdir -p "$CACHE"
-    log="$CACHE/${host//[^A-Za-z0-9._-]/_}-$mode-$(date -u +%Y%m%dT%H%M%SZ).log"
+    # Milliseconds keep name order equal to run order; the loop only guards a same-millisecond rerun.
+    base="$CACHE/${host//[^A-Za-z0-9._-]/_}-$mode-$(date -u +%Y%m%dT%H%M%S.%3NZ)"
+    log=$base.log n=2
+    while [ -e "$log" ]; do log=$base-$n.log; n=$((n + 1)); done
     ssh "$host" 'bash -s' < <(bundle "$mode") > "$log" 2>&1
     rc=$?
     cat "$log"

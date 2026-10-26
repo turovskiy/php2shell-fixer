@@ -6,6 +6,15 @@ P2S_SCHEMA=1
 # Every filesystem path goes through the root prefix, so tests can point the scripts at a fake host.
 p2s_path() { printf '%s%s' "${P2S_ROOT:-}" "$1"; }
 
+# Host OS as ID-VERSION_ID from os-release (ubuntu-24.04), or unknown.
+p2s_os() {
+  local f id ver
+  f=$(p2s_path /etc/os-release)
+  id=$(sed -nE 's/^ID="?([^"]*)"?$/\1/p' "$f" 2>/dev/null | head -1)
+  ver=$(sed -nE 's/^VERSION_ID="?([^"]*)"?$/\1/p' "$f" 2>/dev/null | head -1)
+  if [ -n "$id$ver" ]; then echo "$id-$ver"; else echo unknown; fi
+}
+
 # One machine-readable record: "@p2s schema=1 key=value ...". Values carry no spaces.
 p2s_record() {
   printf '@p2s schema=%s' "$P2S_SCHEMA"
