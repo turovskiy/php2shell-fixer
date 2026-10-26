@@ -242,6 +242,19 @@ if [ ${#need[@]} -gt 0 ]; then
   for e in "${keep[@]}" "${need[@]}"; do
     [[ " ${write[*]} " == *" $e "* ]] || write+=("$e")
   done
+  # From here until the dry run's verdict the entry is unchecked. A dropped ssh session (SIGHUP) or a kill
+  # puts the file back as it was first, then reports; SIGPIPE is ignored, the session's output being gone.
+  au_interrupted() {
+    trap '' PIPE
+    if [ -n "$ubk" ]; then cp -p "$(p2s_path "$ubk")" "$uc"; else rm -f "$uc"; fi
+    for e in "${need[@]}"; do
+      p2s_record kind=uu_entry host="$host" value="$(p2s_enc "$e")" file="$P2S_UU_CONF" action=removed
+    done
+    echo "STOP: interrupted before the dry run's verdict; $P2S_UU_CONF is back as it was"
+    p2s_record kind=keeper host="$host" state=interrupted reason=signal
+    exit 1
+  }
+  trap au_interrupted HUP INT TERM
   if mkdir -p "${uc%/*}" && {
     echo '// Managed by php2shell-fixer: unattended-upgrades installs updates from the ondrej/sury PPA.'
     echo "// Distro-built PHP branches are pinned off the PPA in $P2S_PIN_DIR/php2shell-php<X.Y>.pref."
@@ -263,6 +276,7 @@ if [ ${#need[@]} -gt 0 ]; then
       P2S_ROLLBACK+=("rm $P2S_UU_CONF   # PPA origin for unattended-upgrades")
     fi
   else
+    trap - HUP INT TERM
     echo "STOP: could not write $P2S_UU_CONF"
     au_end 1 state=stopped reason=origin-write-failed
   fi
@@ -293,6 +307,7 @@ for e in "${entries[@]}"; do
 done
 [ "$result" != ok ] || [ ${#from_ppa[@]} -eq 0 ] || result=distro-from-ppa
 [ "$drc" = 0 ] || result=failed
+trap - HUP INT TERM   # the verdict is in: from here on the entry is kept or taken out below
 p2s_record kind=uu_dryrun host="$host" result="$result" exit="$drc" \
   origins_allowed="$(if [ ${#seen[@]} -gt 0 ]; then IFS=,; echo "${seen[*]}"; else echo -; fi)" \
   from_ppa="$(if [ ${#from_ppa[@]} -gt 0 ]; then IFS=,; echo "${from_ppa[*]}"; else echo -; fi)"

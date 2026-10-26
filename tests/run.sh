@@ -340,7 +340,8 @@ for p; do stub_policy "$p"; done'
 # unattended-upgrade --dry-run: prints the origins it accepts, as unattended-upgrades does, from the merged apt
 # config with ${distro_id} and ${distro_codename} filled in, then the packages it would upgrade: those of
 # uu-upgrades.txt ("<Release Origin> <package>", what this unattended-upgrades would take from which origin)
-# whose origin it accepts, on one "Packages that will be upgraded:" line. fail-uu makes it fail.
+# whose origin it accepts, on one "Packages that will be upgraded:" line. fail-uu makes it fail; slow-uu makes
+# it take that many seconds once it accepts the ondrej PPA.
 stub unattended-upgrade 'cat >/dev/null
 [ -e "$P2S_STUB/fail-uu" ] && { echo "E: unattended-upgrade: apt_pkg.Error: E:Unable to parse package file"; exit 1; }
 . "$P2S_STUBLIB/apt.sh"
@@ -349,6 +350,7 @@ allowed=$(stub_aptconf_dump | sed -nE "s/^Unattended-Upgrade::Allowed-Origins:: 
   | sed "s/\${distro_id}/Ubuntu/g; s/\${distro_codename}/$code/g" | paste -sd, - | sed "s/,o=/, o=/g; s/,origin=/, origin=/g")
 echo "Starting unattended upgrades script"
 echo "Allowed origins are: $allowed"
+case ", $allowed," in *", o=LP-PPA-ondrej-php,"*) [ -f "$P2S_STUB/slow-uu" ] && sleep "$(cat "$P2S_STUB/slow-uu")" ;; esac
 up=()
 while read -r o p; do
   case ", $allowed," in *", o=$o,"* | *", origin=$o,"*) up+=("$p") ;; esac
@@ -1265,6 +1267,26 @@ done
 eq "$(ls "$(y /etc/apt/preferences.d)") $(ls "$(y /etc/apt/apt.conf.d)")" "php2shell-php8.3.pref 51php2shell-ppa-origins" \
   "web-y over old files: no backup left where apt reads"
 has "$(cat "$(y $UUC)")" '"Example:noble"; "LP-PPA-ondrej-php:noble";' "web-y over old files: the old origin kept in the new entry"
+
+# The connection drops while the dry run judges the new origin entry: like sshd, the ssh stub sends the session
+# SIGHUP and then SIGKILL. The keeper puts the entry back as it was before it goes, so no unchecked entry stays.
+for prev in no old; do
+  yreset
+  if [ "$prev" = old ]; then mkdir -p "$(y /etc/apt/apt.conf.d)"; printf '%s\n' "$OLDUU" >"$(y $UUC)"; fi
+  echo 30 >"$WORK/hosts/web-y/slow-uu"
+  echo 3 >"$WORK/hosts/web-y/drop-after"
+  AH=$(bash "$S/run.sh" autoupdate web-y 2>&1); code=$?
+  eq "$code" 255 "web-y drop during the dry run ($prev entry before): connection lost"
+  has "$AH" "kind=uu_entry host=web-y value=LP-PPA-ondrej-php:noble file=$UUC action=written" \
+    "web-y drop during the dry run ($prev entry before): the entry was written before the drop"
+  has "$AH" "kind=keeper host=web-y state=interrupted" "web-y drop during the dry run ($prev entry before): keeper record"
+  if [ "$prev" = old ]; then
+    eq "$(cat "$(y $UUC)" 2>/dev/null)" "$OLDUU" "web-y drop during the dry run (old entry before): the old entry is back"
+  else
+    [ -e "$(y $UUC)" ] && bad "web-y drop during the dry run (no entry before): the entry is removed again" "$AH" \
+      || ok "web-y drop during the dry run (no entry before): the entry is removed again"
+  fi
+done
 
 # The dry run fails: the origin entry it was asked to accept is taken out again, the pin stays.
 yreset
