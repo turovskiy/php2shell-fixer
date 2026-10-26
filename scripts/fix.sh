@@ -236,7 +236,7 @@ stamp=$(date -u +%Y%m%dT%H%M%S%3NZ)
 worker=$P2S_STATE/fix-$stamp.worker.sh
 {
   echo '#!/bin/bash'
-  printf 'P2S_ROOT=%q\n' "${P2S_ROOT:-}"
+  printf 'export P2S_ROOT=%q\n' "${P2S_ROOT:-}"
   declare -p P2S_UPSTREAM_FIXED P2S_UBUNTU_FIXED P2S_FIXES_RELEASED P2S_SCHEMA P2S_INI_MARKER P2S_INI_LEGACY P2S_STATE
   declare -f
   printf 'p2s_fix_worker %q >>%q 2>&1\n' "$stamp" "$P2S_STATE/fix-$stamp.log"

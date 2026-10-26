@@ -54,6 +54,8 @@ for target in $(cut -f1 <<<"$newest" | sort -u); do
     elif [ "$(word unmitigated "$a")" != - ]; then
       step=ensure reason="not mitigated: $(word unmitigated "$a")"
       [ "$(word overrides "$a")" = - ] || reason+=", pool override: $(word overrides "$a") (the operator removes it)"
+    elif [ "$(word hook "$a")" = missing ] || [ "$(word hook "$a")" = outdated ]; then
+      step=ensure reason="mitigated, but the apt hook that keeps it in place is $(word hook "$a")"
     else
       step=done reason="every branch fixed and restarted, every web SAPI mitigated"
     fi

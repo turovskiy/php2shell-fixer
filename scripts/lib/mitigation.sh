@@ -143,3 +143,79 @@ p2s_ensure_sapi() {
   if [ "$P2S_MSTATE" != mitigated ] && [ "$P2S_RC" = 0 ]; then P2S_RC=3; fi
 }
 
+# The apt hook: after every dpkg run, apt calls a local copy of ensure, so a PHP branch installed later gets
+# its 99-security.ini too. Two files, both generated here so audit and ensure build the same reference.
+P2S_HOOK_SCRIPT=/usr/local/sbin/php2shell-ensure
+P2S_HOOK_CONF=/etc/apt/apt.conf.d/99php2shell-ensure
+P2S_HOOK_LOG=/var/log/php2shell-ensure.log
+
+# What the hook script runs: ensure on every web SAPI, logged, and exit 0 whatever happens, because apt's
+# own result must never depend on it.
+p2s_hook_run() {
+  local host branch sapi log
+  # A log that cannot be opened must not stop the mitigation: bash skips a block whose redirection fails.
+  log=$(p2s_path "$P2S_HOOK_LOG")
+  mkdir -p "${log%/*}" 2>/dev/null
+  touch "$log" 2>/dev/null || log=/dev/null
+  {
+    host=$(hostname </dev/null)
+    echo "== $(date -u +%Y-%m-%dT%H:%M:%SZ) php2shell ensure from the apt hook on $host"
+    P2S_RC=0 P2S_ROLLBACK=()
+    while read -r branch sapi; do
+      [ -n "$branch" ] || continue
+      p2s_ensure_sapi "$host" "$branch" "$sapi" yes
+    done <<<"$(p2s_web_sapis)"
+    [ "$P2S_RC" = 0 ] || echo "ensure finished with exit $P2S_RC: see the records above"
+  } >>"$log" 2>&1
+  return 0
+}
+
+# The hook script, from a fixed list of functions so every bundle that holds mitigation.sh builds it alike.
+p2s_hook_script() {
+  echo '#!/bin/bash'
+  echo '# Managed by php2shell-fixer; "run.sh ensure <host>" writes and updates it. apt calls it after every'
+  echo "# dpkg run ($P2S_HOOK_CONF) to put the CVE-2026-115560 mitigation on every web SAPI, PHP branches"
+  echo '# installed later included. It never fails: apt must not depend on it. Log:' "$P2S_HOOK_LOG"
+  printf 'export P2S_ROOT=%q\n' "${P2S_ROOT:-}"
+  declare -p P2S_SCHEMA P2S_INI_MARKER P2S_INI_LEGACY P2S_HOOK_LOG
+  declare -f p2s_path p2s_record p2s_os p2s_ini_content p2s_ini_owner p2s_ini_disables p2s_upload_progress \
+    p2s_fpm_overrides p2s_mitigation_report p2s_web_sapis p2s_config_ok p2s_ensure_sapi p2s_hook_run
+  echo 'export LC_ALL=C'
+  echo 'p2s_hook_run'
+  echo 'exit 0'
+}
+
+p2s_hook_conf() {
+  echo '// Managed by php2shell-fixer: re-applies the CVE-2026-115560 mitigation after every dpkg run.'
+  echo "// Rollback: rm $P2S_HOOK_CONF $P2S_HOOK_SCRIPT"
+  echo "DPkg::Post-Invoke { \"if [ -x $P2S_HOOK_SCRIPT ]; then timeout 120 $P2S_HOOK_SCRIPT || true; fi\"; };"
+}
+
+# present | missing | outdated: the installed hook against what this plugin version writes.
+p2s_hook_state() {
+  local s c
+  s=$(p2s_path "$P2S_HOOK_SCRIPT") c=$(p2s_path "$P2S_HOOK_CONF")
+  if [ ! -e "$s" ] && [ ! -e "$c" ]; then echo missing
+  elif [ "$(cat "$s" 2>/dev/null)" = "$(p2s_hook_script)" ] && [ "$(cat "$c" 2>/dev/null)" = "$(p2s_hook_conf)" ]; then echo present
+  else echo outdated
+  fi
+}
+
+# Write the hook where it is missing or outdated. Sets P2S_HOOK_ACTION: installed | updated | unchanged | failed.
+p2s_hook_install() {
+  local state s c
+  state=$(p2s_hook_state)
+  s=$(p2s_path "$P2S_HOOK_SCRIPT") c=$(p2s_path "$P2S_HOOK_CONF")
+  if [ "$state" = present ]; then
+    P2S_HOOK_ACTION=unchanged
+    return 0
+  fi
+  if mkdir -p "$(dirname "$s")" "$(dirname "$c")" && p2s_hook_script >"$s.new" && chmod 755 "$s.new" && mv "$s.new" "$s" \
+    && p2s_hook_conf >"$c.new" && mv "$c.new" "$c"; then
+    P2S_HOOK_ACTION=$([ "$state" = missing ] && echo installed || echo updated)
+  else
+    rm -f "$s.new" "$c.new"
+    P2S_HOOK_ACTION=failed
+  fi
+}
+

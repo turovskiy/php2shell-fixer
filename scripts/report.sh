@@ -170,6 +170,14 @@ while IFS=$'\t' read -r _ _ _ log; do
           *) probes+=("- HTTP probe: every status code unchanged") ;;
         esac
         ;;
+      ensure_hook)
+        case ${r[state]} in
+          present) h="present" ;;
+          *) h="**${r[state]}** - a PHP branch installed later would not get the mitigation" ;;
+        esac
+        [ -z "${r[action]:-}" ] || h="${r[action]}, now $h"
+        facts+=("- apt hook keeping the mitigation in place: $h")
+        ;;
       webserver)
         facts+=("- Web servers: nginx ${r[nginx]}, apache2 ${r[apache2]}")
         ;;

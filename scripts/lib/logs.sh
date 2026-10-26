@@ -40,7 +40,8 @@ p2s_newest_logs() { # $@ logs
 # What a log found, as one line of key=value words:
 # status (ok | exit-<n> | unreachable | timeout | none for a log without run_end), exit, reached (a host
 # record exists), unfixed and restart_needed (branches), unmitigated (branch/sapi:state), overrides
-# (file:line of pool overrides that re-enable upload progress). "-" stands for none.
+# (file:line of pool overrides that re-enable upload progress), hook (the apt hook's state: present, missing,
+# outdated). "-" stands for none.
 p2s_log_summary() { # $1 log
   awk '
     function add(v, x) { return v == "" ? x : v "," x }
@@ -56,10 +57,12 @@ p2s_log_summary() { # $1 log
       else if (r["kind"] == "fix" && r["fixed"] == "no") unf = add(unf, r["branch"])
       else if (r["kind"] == "mitigation" && r["state"] != "mitigated") um = add(um, r["branch"] "/" r["sapi"] ":" r["state"])
       else if (r["kind"] == "override" && r["enables"] == "yes") ov = add(ov, r["file"] ":" r["line"])
+      else if (r["kind"] == "ensure_hook") hook = r["state"]
     }
     END {
-      printf "status=%s exit=%s reached=%s unfixed=%s restart_needed=%s unmitigated=%s overrides=%s\n",
+      printf "status=%s exit=%s reached=%s unfixed=%s restart_needed=%s unmitigated=%s overrides=%s hook=%s\n",
         (status == "" ? "none" : status), (ex == "" ? "-" : ex), (reached == "" ? "no" : reached),
-        (unf == "" ? "-" : unf), (rn == "" ? "-" : rn), (um == "" ? "-" : um), (ov == "" ? "-" : ov)
+        (unf == "" ? "-" : unf), (rn == "" ? "-" : rn), (um == "" ? "-" : um), (ov == "" ? "-" : ov),
+        (hook == "" ? "-" : hook)
     }' "$1"
 }
