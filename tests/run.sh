@@ -78,7 +78,9 @@ stub dpkg-query 'cat "$P2S_STUB/dpkg-query.txt"'
 stub systemctl 'if [ "$1" = is-active ]; then
   grep -qxF "${2%.service}" "$P2S_STUB/active.txt" && { echo active; exit 0; }
   echo inactive; exit 3
-fi'
+fi
+[ "$1" = reload ] && [ -e "$P2S_STUB/fail-reload" ] && exit 1
+exit 0'
 stub dpkg "exec $REAL_DPKG \"\$@\""
 stub apt-cache '[ "$1" = madison ] && [ -f "$P2S_STUB/madison/$2.txt" ] && cat "$P2S_STUB/madison/$2.txt"
 exit 0'
@@ -94,13 +96,40 @@ fi'
 stub dpkg-deb 'cat >/dev/null
 [ "$1" = --fsys-tarfile ] && exec cat "$P2S_STUB/debs/$(cat "$2").tar"'
 for t in apt apt-mark; do stub "$t" 'exit 0'; done
+stub id 'echo "${STUB_UID:-0}"'
+# SAPI binaries: the effective upload_progress comes from the fake root's ini files, last assignment wins
+# (php.ini, then conf.d in order). A host without /etc/php/<X.Y>/<sapi> behaves as if the binary failed.
+# fail-t-<binary> in the host fixture makes the config test fail (FPM: exit 78; CGI: an ini error on stderr).
+SAPI_STUB='n=${0##*/}
+case $n in php-fpm*) s=fpm b=${n#php-fpm} ;; *) s=cgi b=${n#php-cgi} ;; esac
+d=$P2S_ROOT/etc/php/$b/$s
+case $1 in
+  -t)
+    [ -e "$P2S_STUB/fail-t-$n" ] && { echo "ERROR: failed to load configuration file $d/conf.d/99-security.ini" >&2; exit 78; }
+    echo "NOTICE: configuration file $d/../php-fpm.conf test is successful" >&2 ;;
+  -v)
+    [ -e "$P2S_STUB/fail-t-$n" ] && echo "PHP:  syntax error, unexpected \"=\" in $d/conf.d/99-security.ini on line 3" >&2
+    echo "PHP $b.0 (cgi-fcgi)" ;;
+  -i)
+    [ -d "$d" ] || exit 1
+    v=On
+    for f in "$d/php.ini" "$d"/conf.d/*.ini; do
+      [ -f "$f" ] || continue
+      x=$(sed -nE "s/^[[:space:]]*session\.upload_progress\.enabled[[:space:]]*=[[:space:]]*\"?([^\";[:space:]]+).*/\1/p" "$f" | tail -1)
+      [ -n "$x" ] || continue
+      case ${x,,} in 0 | off | false | no) v=Off ;; *) v=On ;; esac
+    done
+    if [ "$s" = fpm ]; then echo "session.upload_progress.enabled => $v => $v"
+    else echo "<tr><td class=\"e\">session.upload_progress.enabled</td><td class=\"v\">$v</td><td class=\"v\">$v</td></tr>"; fi ;;
+esac'
+for b in 7.4 8.1 8.2 8.3 8.4; do stub "php-fpm$b" "$SAPI_STUB"; stub "php-cgi$b" "$SAPI_STUB"; done
 export PATH="$WORK/bin:$PATH"
 # The audit's temp dir on the "host": must be empty again after every run.
 export TMPDIR=$WORK/hosttmp
 mkdir -p "$TMPDIR"
 
 # Calls an audit may make; anything else in the stub log is a write or a package operation.
-READ_ONLY='^(ssh [^ ]+ bash -s|hostname ?|dpkg-query .*|systemctl is-active [^ ]+|dpkg --compare-versions .*|apt-cache madison [^ ]+|apt-get download -q [^ ]+|dpkg-deb --fsys-tarfile [^ ]+)$'
+READ_ONLY='^(ssh [^ ]+ bash -s|hostname ?|dpkg-query .*|systemctl is-active [^ ]+|dpkg --compare-versions .*|apt-cache madison [^ ]+|apt-get download -q [^ ]+|dpkg-deb --fsys-tarfile [^ ]+|php-(fpm|cgi)[0-9.]+ -i)$'
 fingerprint() { (cd "$WORK/hosts" && find . -type f -exec md5sum {} + | sort); }
 
 echo "▸ verdict (installed build)"
@@ -108,6 +137,8 @@ echo "▸ verdict (installed build)"
 . "$S/lib/versions.sh"
 # shellcheck source=../scripts/lib/p2s.sh
 . "$S/lib/p2s.sh"
+# shellcheck source=../scripts/lib/mitigation.sh
+. "$S/lib/mitigation.sh"
 vd() { p2s_verdict "$1" "$2" "$(p2s_origin "$2")" "$3"; }
 eq "$(vd 8.3 8.3.6-0ubuntu0.24.04.12 no)" "unfixed below-threshold" "Ubuntu 8.3 .12 unfixed"
 eq "$(vd 8.3 8.3.6-0ubuntu0.24.04.13 yes)" "fixed distro-threshold" "Ubuntu 8.3 .13 fixed"
@@ -239,12 +270,83 @@ eq "$(find "$TMPDIR" -mindepth 1 | head -3)" "" "no candidate download left behi
 bash "$S/run.sh" audit no-such-host >/dev/null 2>&1; code=$?
 eq "$code" 255 "unreachable host: ssh exit code passed through"
 
+echo "▸ audit: mitigation"
+G=$(bash "$S/run.sh" audit web-g)
+has "$G" "kind=mitigation host=web-g branch=8.3 sapi=fpm ini=legacy action=inspected upload_progress=Off overrides=0 state=mitigated" \
+  "web-g: legacy fix.sh file counts as mitigated"
+has "$G" "kind=mitigation host=web-g branch=8.3 sapi=cgi ini=foreign action=inspected upload_progress=On overrides=0 state=foreign" \
+  "web-g: foreign 99-security.ini in CGI reported"
+has "$A" "kind=mitigation host=web-a branch=8.3 sapi=fpm ini=absent action=inspected upload_progress=unknown overrides=0 state=unknown" \
+  "web-a: SAPI without readable config -> unknown, not mitigated"
+hasnt "$C" "kind=mitigation" "web-c: CLI only -> no mitigation records"
+
 echo "▸ audit: read-only"
 WRITES=$(grep -vE "$READ_ONLY" "$STUB_LOG")
 eq "$WRITES" "" "no write command or package operation in the stub log"
 eq "$(printf 'apt-get install -y php8.3-fpm\nsystemctl restart php8.3-fpm\ndpkg -i x.deb\n' | grep -cvE "$READ_ONLY")" 3 \
   "the read-only filter flags installs, restarts and dpkg -i"
 eq "$(fingerprint)" "$BEFORE" "fake roots unchanged"
+
+echo "▸ ensure"
+INI=$(p2s_ini_content)
+ini() { cat "$WORK/hosts/$1/root/etc/php/$2/conf.d/99-security.ini" 2>/dev/null; }
+: >"$STUB_LOG"
+F=$(bash "$S/run.sh" ensure web-f); code=$?
+eq "$code" 0 "web-f fresh: exit 0"
+eq "$(ini web-f 8.3/fpm)" "$INI" "web-f: 8.3 fpm ini written"
+eq "$(ini web-f 8.3/cgi)" "$INI" "web-f: 8.3 cgi ini written"
+eq "$(ini web-f 8.4/fpm)" "$INI" "web-f: 8.4 fpm ini written"
+eq "$(ini web-f 8.3/cli)" "" "web-f: CLI conf.d untouched"
+eq "$(grep -E '^systemctl (reload|restart|stop|start) ' "$STUB_LOG" | sort)" "$(printf 'systemctl reload php8.3-fpm\nsystemctl reload php8.4-fpm')" \
+  "web-f: both pools reloaded once, nothing restarted"
+has "$F" "kind=mitigation host=web-f branch=8.3 sapi=fpm ini=absent action=written upload_progress=Off overrides=0 state=mitigated" "web-f: 8.3 fpm record"
+has "$F" "kind=mitigation host=web-f branch=8.3 sapi=cgi ini=absent action=written upload_progress=Off overrides=0 state=mitigated" "web-f: 8.3 cgi record (HTML -i output parsed)"
+has "$F" "rm /etc/php/8.3/fpm/conf.d/99-security.ini && systemctl reload php8.3-fpm" "web-f: rollback line for the pool"
+AFTER1=$(fingerprint)
+: >"$STUB_LOG"
+F2=$(bash "$S/run.sh" ensure web-f); code=$?
+eq "$code" 0 "web-f second run: exit 0"
+eq "$(fingerprint)" "$AFTER1" "web-f second run: no file changes"
+eq "$(grep -cE '^systemctl (reload|restart) ' "$STUB_LOG")" 0 "web-f second run: no reload"
+has "$F2" "branch=8.3 sapi=fpm ini=owned action=unchanged upload_progress=Off overrides=0 state=mitigated" "web-f second run: owned, unchanged"
+
+LEGACY=$(ini web-g 8.3/fpm); FOREIGN=$(ini web-g 8.3/cgi)
+: >"$STUB_LOG"
+Gx=$(bash "$S/run.sh" ensure web-g); code=$?
+eq "$code" 3 "web-g: foreign file -> exit 3"
+eq "$(ini web-g 8.3/fpm)" "$LEGACY" "web-g: legacy file adopted as is"
+eq "$(ini web-g 8.3/cgi)" "$FOREIGN" "web-g: foreign file unchanged"
+has "$Gx" "branch=8.3 sapi=fpm ini=legacy action=adopted upload_progress=Off overrides=0 state=mitigated" "web-g: adopted record"
+has "$Gx" "branch=8.3 sapi=cgi ini=foreign action=left-foreign upload_progress=On overrides=0 state=foreign" "web-g: foreign record"
+eq "$(grep -cE '^systemctl reload ' "$STUB_LOG")" 0 "web-g: nothing written, nothing reloaded"
+
+H=$(bash "$S/run.sh" ensure web-h); code=$?
+eq "$code" 3 "web-h: pool override -> exit 3"
+has "$H" "kind=override host=web-h branch=8.3 sapi=fpm file=/etc/php/8.3/fpm/pool.d/www.conf line=6 pool=www directive=php_admin_flag value=on enables=yes" \
+  "web-h: override named with pool, file and line"
+has "$H" "kind=override host=web-h branch=8.3 sapi=fpm file=/etc/php/8.3/fpm/pool.d/shop.conf line=5 pool=shop directive=php_admin_value value=0 enables=no" \
+  "web-h: disabling override recorded, not counted"
+hasnt "$H" "line=5 pool=www" "web-h: commented-out override ignored"
+has "$H" "kind=mitigation host=web-h branch=8.3 sapi=fpm ini=absent action=written upload_progress=Off overrides=1 state=override" \
+  "web-h: master Off but a pool re-enables it -> override"
+
+: >"$STUB_LOG"
+I=$(bash "$S/run.sh" ensure web-i); code=$?
+eq "$code" 1 "web-i: config test fails -> exit 1"
+eq "$(ini web-i 8.3/fpm)" "" "web-i: new ini removed"
+eq "$(grep -E '^systemctl (reload|restart|stop) ' "$STUB_LOG")" "" "web-i: pool neither reloaded nor stopped"
+has "$I" "action=test-failed" "web-i: test failure recorded"
+has "$I" "ERROR: failed to load configuration file" "web-i: config test output shown"
+
+BEFORE_ROOT=$(fingerprint)
+NR=$(STUB_UID=1000 bash "$S/run.sh" ensure web-h); code=$?
+eq "$code" 1 "not root: exit 1"
+has "$NR" "STOP: ensure must run as root" "not root: says why"
+eq "$(fingerprint)" "$BEFORE_ROOT" "not root: nothing changed"
+
+H2=$(bash "$S/run.sh" audit web-h)
+has "$H2" "kind=mitigation host=web-h branch=8.3 sapi=fpm ini=owned action=inspected upload_progress=Off overrides=1 state=override" \
+  "audit after ensure: owned file, override still reported"
 
 echo "▸ runner"
 has "$(bash "$S/run.sh" bundle audit | head -3)" "Fixed-build thresholds" "bundle starts with the version data"
@@ -264,18 +366,23 @@ has "$R" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.13` | distro | active | yes | fixe
 has "$R" '| 7.4 | fpm | `1:7.4.33-31+ubuntu24.04.1+deb.sury.org+1` | ppa | active | yes | fixed | changelog |' "report: web-a 7.4 row"
 has "$R" '| 8.4 | fpm | `8.4.17-1+ubuntu24.04.1+deb.sury.org+1` | ppa | active | no | **unfixed** | below-threshold |' "report: unfixed in bold"
 has "$R" "## web-c (debian-12)" "report: web-c section"
-has "$R" "No PHP-FPM branch installed." "report: host without PHP-FPM"
+has "$R" "No PHP-FPM or PHP-CGI installed." "report: host without a web SAPI"
 has "$R" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.12` | distro | inactive | no | **unfixed** | below-threshold | `8.3.6-0ubuntu0.24.04.13` |' \
   "report: target column with the target build"
 has "$R" '| below-threshold | none (no-fixed-build-in-cached-lists) |' "report: no target shows its reason"
 has "$R" '| distro-threshold | none (installed-fixed) |' "report: fixed branch shows installed-fixed"
 hasnt "$R" "kind=candidate" "report: candidate records not dumped"
 printf '@p2s schema=1 kind=host host=old os=ubuntu-24.04\n@p2s schema=1 kind=branch host=old branch=8.3 sapi=fpm installed=8.3.6-0ubuntu0.24.04.13 origin=distro active=active cve_changelog=yes verdict=fixed reason=distro-threshold\n' >"$WORK/old.log"
+MR=$(bash "$S/report.sh" "$(grep -l 'kind=mitigation' "$P2S_CACHE"/web-h-ensure-*.log | head -1)" "$(ls "$P2S_CACHE"/web-g-audit-*.log)")
+has "$MR" '| 8.3 | fpm | absent | written | Off | 1 | **override** |' "report: mitigation row with the override state"
+has "$MR" '- php8.3 pool `www`: `/etc/php/8.3/fpm/pool.d/www.conf:6` php_admin_flag = on - **re-enables it**' "report: override listed with file and line"
+has "$MR" '| 8.3 | cgi | foreign | inspected | On | 0 | **foreign** |' "report: foreign file in the audit"
+hasnt "$MR" "No PHP-FPM or PHP-CGI installed." "report: ensure log without branch rows still has its table"
 has "$(bash "$S/report.sh" "$WORK/old.log")" '| fixed | distro-threshold | - |' "report: log from before targets shows -"
 has "$R" '| none (no-fixed-build-in-cached-lists) | **2026-09-30, older than the fixes** |' "report: stale lists flagged next to the missing target"
 has "$R" '| `8.3.6-0ubuntu0.24.04.13` | 2026-10-24 |' "report: fresh lists show their date"
 has "$R" '| none (installed-fixed) | unknown |' "report: host without apt lists shows unknown"
-eq "$(grep -c '^| Branch |' <<<"$R")" 3 "report: one table per host with branches"
+eq "$(grep -c '^| Branch | SAPI | Installed |' <<<"$R")" 3 "report: one branch table per host with branches"
 hasnt "$R" "== php2shell audit" "report: human section of the log not copied"
 
 bash "$S/report.sh" "$WORK/missing.log" >/dev/null 2>&1; code=$?

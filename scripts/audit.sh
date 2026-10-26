@@ -1,29 +1,21 @@
 # Read-only PHP2Shell audit of one host. Changes nothing.
-# Runs as the tail of the bundle from run.sh (after versions.sh and p2s.sh): run.sh audit <host>
+# Runs as the tail of the bundle from run.sh (after versions.sh, p2s.sh, mitigation.sh): run.sh audit <host>
 # Output: a human-readable section plus "@p2s" records (schema in p2s.sh): one "branch" record per PHP-FPM
-# branch with its verdict and target, one "candidate" record per build apt offers for it.
+# branch with its verdict and target, one "candidate" record per build apt offers for it, and one
+# "mitigation" record (plus "override" records) per web SAPI.
 set -u
 export LC_ALL=C
 
-field() { # field <file> <key>: value of KEY=... in an os-release style file, quotes stripped
-  sed -nE "s/^$2=\"?([^\"]*)\"?$/\1/p" "$1" 2>/dev/null | head -1
-}
-
-host=$(hostname)
-osr=$(p2s_path /etc/os-release)
-os="$(field "$osr" ID)-$(field "$osr" VERSION_ID)"
-[ "$os" = - ] && os=unknown
+host=$(hostname </dev/null)
+os=$(p2s_os)
 
 echo "== php2shell audit: $host ($os)"
 p2s_record kind=host host="$host" os="$os"
 
 # Installed PHP-FPM packages of a versioned branch (php8.3-fpm), not the php-fpm metapackage or removed ones.
-pkgs=$(dpkg-query -W -f='${db:Status-Abbrev}|${binary:Package}|${Version}\n' 'php*-fpm' 2>/dev/null \
+pkgs=$(dpkg-query -W -f='${db:Status-Abbrev}|${binary:Package}|${Version}\n' 'php*-fpm' </dev/null 2>/dev/null \
   | awk -F'|' '$1 ~ /^ii/ && $2 ~ /^php[0-9]+\.[0-9]+-fpm$/ {print $2 "|" $3}')
-if [ -z "$pkgs" ]; then
-  echo "no PHP-FPM branch installed"
-  exit 0
-fi
+[ -n "$pkgs" ] || echo "no PHP-FPM branch installed"
 
 # Candidate .debs are fetched into one temp dir that goes away however the audit ends.
 P2S_TMP=$(mktemp -d)
@@ -65,6 +57,7 @@ lists_date() {
 }
 
 while IFS='|' read -r pkg ver; do
+  [ -n "$pkg" ] || continue
   branch=${pkg#php}
   branch=${branch%-fpm}
   origin=$(p2s_origin "$ver")
@@ -111,3 +104,11 @@ while IFS='|' read -r pkg ver; do
     target="$target" target_reason="$treason" lists_updated="$lists" lists_stale="$stale"
   [ ${#crecords[@]} -eq 0 ] || printf '%s\n' "${crecords[@]}"
 done <<<"$pkgs"
+
+echo "== upload_progress mitigation (CVE-2026-115560)"
+while read -r mbranch msapi; do
+  [ -n "$mbranch" ] || continue
+  owner=$(p2s_ini_owner "$(p2s_path "/etc/php/$mbranch/$msapi/conf.d/99-security.ini")")
+  p2s_mitigation_report "$host" "$mbranch" "$msapi" "$owner" inspected
+  echo "php$mbranch $msapi: 99-security.ini $owner -> $P2S_MSTATE"
+done <<<"$(p2s_web_sapis)"

@@ -1,6 +1,6 @@
 ---
 name: php2shell
-description: PHP2Shell (CVE-2026-109618, CVE-2026-109619) and CVE-2026-115560 on Debian and Ubuntu PHP servers. Use to check whether a host is vulnerable or already patched, per PHP branch, and to produce a per-host report.
+description: PHP2Shell (CVE-2026-109618, CVE-2026-109619) and CVE-2026-115560 on Debian and Ubuntu PHP servers. Use to check whether a host is vulnerable or already patched per PHP branch, to put or keep the upload_progress mitigation in place, and to produce a per-host report.
 ---
 
 # PHP2Shell
@@ -14,7 +14,8 @@ Scripts live in `${CLAUDE_PLUGIN_ROOT}/scripts/`. Each run prints a human sectio
 1. **Audit** every host the operator names: `bash ${CLAUDE_PLUGIN_ROOT}/scripts/run.sh audit <host>`, where host is an ssh alias or `user@address`. The audit is read-only. When the permission layer denies the call, hand the operator the same line as a `!` command and read its output back. Done when each host either printed `log: <path>` with a host record in that log, or exited 255 (ssh failed: the host is unreachable).
 2. **Report**: `bash ${CLAUDE_PLUGIN_ROOT}/scripts/report.sh <log>...` over the logs from step 1. Show the operator the tables and list unreachable hosts beside them. Done when every host from step 1 has a section or an unreachable line.
 3. **Confirm the restart for every `fixed` branch.** The verdict judges the installed package; a running PHP-FPM keeps executing the build it started with until it is restarted, so a host can report `fixed` and still serve the vulnerable code. The audit does not check this yet. Per `fixed` branch, compare the service start (`systemctl show -p ActiveEnterTimestamp --value php<X.Y>-fpm`) with the package install time (`stat -c %y /var/lib/dpkg/info/php<X.Y>-fpm.list`), both read-only; hand them to the operator as `!` commands when the call is denied. Done when each `fixed` branch is either "started after install" or reported as "installed, restart not confirmed". Call a host protected only when all its branches are fixed and started after install.
-4. **Stop at the report.** This version audits only: patching, the upload-progress mitigation and auto-updates are not built yet. For each `unfixed` branch, name the host, branch, reason and target. A target of `none` is a statement about the host's cached apt lists, never about whether a fix exists: when `lists_stale` is `yes` or `unknown`, say the lists predate the fixes (or are unknown) and that `apt-get update` comes first, which is a write the operator runs.
+4. **Ensure the mitigation** on every host where a `mitigation` record is not `mitigated`: hand the operator `! bash ${CLAUDE_PLUGIN_ROOT}/scripts/run.sh ensure <host>`, since it writes `99-security.ini` and reloads FPM pools. Read its log back and run step 2 over it. Exit 0: every web SAPI mitigated. Exit 3: name each blocker from the records, and leave the fix to the operator, because the files are theirs: an `override` record that `enables=yes` (file, line, pool), a `foreign` 99-security.ini, a SAPI still `On` or `unknown`. Exit 1: a config test failed (the change was rolled back and the pool kept running) or a reload failed; show the output. Done when every host's newest log shows each web SAPI `mitigated` or a named blocker.
+5. **Stop at the report.** Patching and auto-updates are not built yet. For each `unfixed` branch, name the host, branch, reason and target. A target of `none` is a statement about the host's cached apt lists, never about whether a fix exists: when `lists_stale` is `yes` or `unknown`, say the lists predate the fixes (or are unknown) and that `apt-get update` comes first, which is a write the operator runs.
 
 ## Verdict reasons
 
@@ -40,3 +41,17 @@ The audit judges the builds apt offers from the lists already on the host (it ne
 | `no-fixed-build-in-cached-lists` | PPA or other build, and the cached lists hold no fixed build of that origin |
 
 `lists_updated` is when the newest apt list of the branch's origin last changed; `lists_stale=yes` means it is older than the day the fixed builds came out, so the lists cannot contain one. Candidate records with `cve_changelog=download-failed` were judged by version thresholds alone.
+
+## Mitigation states
+
+`session.upload_progress.enabled = 0` closes CVE-2026-115560 and the session path of CVE-2026-109619, whether or not a fixed build exists. It only counts when set before the request is parsed (php.ini, `conf.d`, pool config); `ini_set()` and `.user.ini` come too late.
+
+| State | Meaning |
+|---|---|
+| `mitigated` | The SAPI reports Off and no pool re-enables it |
+| `override` | A pool `php_value`/`php_admin_value`/`php_flag`/`php_admin_flag` turns it back on; `php-fpm -i` cannot see this, the pool scan does |
+| `foreign` | A 99-security.ini without the plugin marker or the legacy fix.sh comment; ensure leaves it alone |
+| `not-mitigated` | The SAPI reports On |
+| `unknown` | The SAPI binary gave no answer |
+
+`ini=legacy` is a file written by the earlier fix.sh; ensure adopts it unchanged when it already turns upload progress off.
