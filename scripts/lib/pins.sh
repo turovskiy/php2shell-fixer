@@ -38,9 +38,9 @@ p2s_php_packages() {
       $2 ~ /^libapache2-mod-php[0-9]+\.[0-9]+$/ { b = $2; sub(/^libapache2-mod-php/, "", b); print b "|" $2 "|" $3 }'
 }
 
-# What apt would do with a package now: "<installed> <candidate> <ppa>", ppa being yes when a PPA source offers
-# any build of it. "(none)" for no installed build or no candidate.
-p2s_policy() { # $1 package
+# A package's state in apt-cache policy now: "<installed> <candidate> <ppa>", ppa being yes when a PPA source
+# offers any build of it. "(none)" for no installed build or no candidate.
+p2s_policy_state() { # $1 package
   local out inst cand ppa=no
   out=$(apt-cache policy "$1" </dev/null 2>/dev/null)
   inst=$(sed -nE 's/^  Installed: (.*)$/\1/p' <<<"$out" | head -1)

@@ -64,21 +64,21 @@ fi
 # install before anything changes, and whether the PPA offers any of its packages.
 all=$(p2s_php_packages)
 branches=$(awk -F'|' 'NF && !seen[$1]++ {print $1}' <<<"$all")
-declare -A b_rep b_inst b_origin b_before b_ppa b_pin
+declare -A b_pkg b_inst b_origin b_before b_ppa b_pin
 for b in $branches; do
   pkgs=$(awk -F'|' -v b="$b" '$1 == b {print $2}' <<<"$all")
-  rep=""
+  pkg=""
   for p in "php$b-fpm" "libapache2-mod-php$b" "php$b-common"; do
-    grep -qxF "$p" <<<"$pkgs" && { rep=$p; break; }
+    grep -qxF "$p" <<<"$pkgs" && { pkg=$p; break; }
   done
-  [ -n "$rep" ] || rep=$(head -1 <<<"$pkgs")
-  b_rep[$b]=$rep
-  b_inst[$b]=$(awk -F'|' -v p="$rep" '$2 == p {print $3}' <<<"$all")
+  [ -n "$pkg" ] || pkg=$(head -1 <<<"$pkgs")
+  b_pkg[$b]=$pkg
+  b_inst[$b]=$(awk -F'|' -v p="$pkg" '$2 == p {print $3}' <<<"$all")
   b_origin[$b]=$(p2s_origin "${b_inst[$b]}")
   b_ppa[$b]=no b_pin[$b]=-
   for p in $pkgs; do
-    read -r _ cand ppa <<<"$(p2s_policy "$p")"
-    [ "$p" = "$rep" ] && b_before[$b]=$cand
+    read -r _ cand ppa <<<"$(p2s_policy_state "$p")"
+    [ "$p" = "$pkg" ] && b_before[$b]=$cand
     [ "$ppa" = yes ] && b_ppa[$b]=yes
   done
 done
@@ -134,8 +134,8 @@ refused=()
 for b in $branches; do
   moved=() cand=""
   for p in $(awk -F'|' -v b="$b" '$1 == b {print $2}' <<<"$all"); do
-    read -r inst c _ <<<"$(p2s_policy "$p")"
-    [ "$p" = "${b_rep[$b]}" ] && cand=$c
+    read -r inst c _ <<<"$(p2s_policy_state "$p")"
+    [ "$p" = "${b_pkg[$b]}" ] && cand=$c
     [ "$c" != "(none)" ] && [ "$inst" != "(none)" ] && [ "$(p2s_origin "$c")" != "$(p2s_origin "$inst")" ] && moved+=("$p")
   done
   corigin=$(p2s_origin "$cand")
@@ -144,16 +144,16 @@ for b in $branches; do
     refused+=("$b")
     if [ "${b_pin[$b]}" = - ]; then state=would-change; else state=pin-ineffective; fi
   fi
-  p2s_record kind=policy host="$host" branch="$b" origin="${b_origin[$b]}" package="${b_rep[$b]}" installed="${b_inst[$b]}" \
+  p2s_record kind=policy host="$host" branch="$b" origin="${b_origin[$b]}" package="${b_pkg[$b]}" installed="${b_inst[$b]}" \
     before="${b_before[$b]:-(none)}" candidate="$cand" candidate_origin="$corigin" \
     moved="$(if [ ${#moved[@]} -gt 0 ]; then IFS=,; echo "${moved[*]}"; else echo -; fi)" pin="${b_pin[$b]}" state="$state" \
     before_origin="$(p2s_origin "${b_before[$b]:-(none)}")"
-  echo "php$b (${b_origin[$b]}): ${b_rep[$b]} candidate ${b_before[$b]:-(none)} before, $cand ($corigin) now: $state"
+  echo "php$b (${b_origin[$b]}): ${b_pkg[$b]} candidate ${b_before[$b]:-(none)} before, $cand ($corigin) now: $state"
   [ "$state" = kept ] && continue
   echo "STOP: php$b: apt would move ${moved[*]} from the ${b_origin[$b]} build to $corigin ($cand)"
   if [ "$state" = pin-ineffective ]; then
     echo "  the pin in ${b_pin[$b]} does not hold it: apt does not apply that file, or another preferences entry"
-    echo "  outranks it (apt-cache policy ${b_rep[$b]} shows the priorities)"
+    echo "  outranks it (apt-cache policy ${b_pkg[$b]} shows the priorities)"
     IFS=, read -ra pfs <<<"${b_pin[$b]}"
     for f in "${pfs[@]}"; do
       n=${f##*/}
