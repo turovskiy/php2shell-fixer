@@ -136,16 +136,19 @@ for b in $branches; do
   fi
   f=$(p2s_pin_file "$b")
   pf=$(p2s_path "$f")
-  prev=""
-  [ -e "$pf" ] && prev=$(cat "$pf")
+  bk=""
+  if [ -e "$pf" ] && ! bk=$(p2s_backup "$f"); then
+    echo "STOP: could not back up $f to $P2S_BACKUP_DIR before overwriting it"
+    au_end 1 state=stopped reason=backup-failed
+  fi
   if mkdir -p "${pf%/*}" && p2s_pin_content "$b" "${need[@]}" >"$pf"; then
     b_pin[$b]=$f
     p2s_record kind=pin host="$host" branch="$b" file="$f" action=written
     echo "php$b: pinned off the PPA (${need[*]}) in $f"
-    if [ -n "$prev" ]; then
-      echo "previous $f:"
-      printf '%s\n' "$prev" | sed 's/^/  | /'
-      P2S_ROLLBACK+=("restore the previous $f (content above)")
+    if [ -n "$bk" ]; then
+      echo "previous $f, kept as $bk:"
+      sed 's/^/  | /' "$(p2s_path "$bk")"
+      P2S_ROLLBACK+=("cp $bk $f   # the previous pin file")
     else
       P2S_ROLLBACK+=("rm $f   # pin of php$b")
     fi
@@ -219,7 +222,7 @@ for e in "${entries[@]}"; do
   fi
 done
 uc=$(p2s_path "$P2S_UU_CONF")
-uprev="" uwrote=no pre_up=""
+uprev="" ubk="" uwrote=no pre_up=""
 # The packages a dry run would upgrade, one per line, from its "Packages that will be upgraded:" line.
 au_upgrades() { sed -nE 's/^Packages that will be upgraded: //p' <<<"$1" | tail -1 | tr ' ' '\n' | grep .; }
 if [ ${#need[@]} -gt 0 ]; then
@@ -230,6 +233,10 @@ if [ ${#need[@]} -gt 0 ]; then
   if [ -e "$uc" ]; then
     uprev=$(cat "$uc")
     mapfile -t keep < <(grep -oE '"[^"]*"' "$uc" | tr -d '"')
+    if ! ubk=$(p2s_backup "$P2S_UU_CONF"); then
+      echo "STOP: could not back up $P2S_UU_CONF to $P2S_BACKUP_DIR before overwriting it"
+      au_end 1 state=stopped reason=backup-failed
+    fi
   fi
   write=()
   for e in "${keep[@]}" "${need[@]}"; do
@@ -248,10 +255,10 @@ if [ ${#need[@]} -gt 0 ]; then
       p2s_record kind=uu_entry host="$host" value="$(p2s_enc "$e")" file="$P2S_UU_CONF" action=written
       echo "origin $e: written to $P2S_UU_CONF"
     done
-    if [ -n "$uprev" ]; then
-      echo "previous $P2S_UU_CONF:"
+    if [ -n "$ubk" ]; then
+      echo "previous $P2S_UU_CONF, kept as $ubk:"
       printf '%s\n' "$uprev" | sed 's/^/  | /'
-      P2S_ROLLBACK+=("restore the previous $P2S_UU_CONF (content above)")
+      P2S_ROLLBACK+=("cp $ubk $P2S_UU_CONF   # the previous origin entry")
     else
       P2S_ROLLBACK+=("rm $P2S_UU_CONF   # PPA origin for unattended-upgrades")
     fi
@@ -295,7 +302,7 @@ if [ "$result" != ok ]; then
   why="the dry run does not accept the PPA origin"
   [ "$result" != distro-from-ppa ] || why="with the PPA origin accepted, unattended-upgrades would upgrade ${from_ppa[*]} of a distro-built branch from the PPA"
   if [ "$uwrote" = yes ]; then
-    if [ -n "$uprev" ]; then printf '%s\n' "$uprev" >"$uc"; else rm -f "$uc"; fi
+    if [ -n "$ubk" ]; then cp -p "$(p2s_path "$ubk")" "$uc"; else rm -f "$uc"; fi
     unset 'P2S_ROLLBACK[-1]'
     for e in "${need[@]}"; do
       p2s_record kind=uu_entry host="$host" value="$(p2s_enc "$e")" file="$P2S_UU_CONF" action=removed

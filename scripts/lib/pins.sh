@@ -8,6 +8,15 @@ p2s_pin_file() { echo "$P2S_PIN_DIR/php2shell-php$1.pref"; }   # $1 branch
 # The origin entry. apt.conf.d takes names with no extension or ".conf"; this one has none.
 P2S_UU_CONF=/etc/apt/apt.conf.d/51php2shell-ppa-origins
 
+# A file the keeper is about to overwrite is kept here first, not next to it: apt reads preferences.d and
+# apt.conf.d whole (apt.conf.d even names without an extension), and the keeper scans every file there.
+P2S_BACKUP_DIR=/var/lib/php2shell/backup
+p2s_backup() { # $1 file; prints the backup's path, returns 1 when the copy fails
+  local b
+  b=$P2S_BACKUP_DIR/${1##*/}.$(date -u +%Y%m%dT%H%M%SZ)
+  mkdir -p "$(p2s_path "$P2S_BACKUP_DIR")" && cp -p "$(p2s_path "$1")" "$(p2s_path "$b")" && echo "$b"
+}
+
 # The PPA's PHP sources with what the cached Release file says about them, one "uri|suite|site|origin|label"
 # per line ("-" when apt has no cached Release file for the source). Origin and Label may hold spaces. Only
 # ondrej/php and packages.sury.org/php: the same people's nginx and Apache PPAs ship no PHP, and accepting

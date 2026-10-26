@@ -1243,6 +1243,29 @@ has "$AT" "kind=policy host=web-y branch=8.3 origin=ppa package=php8.3-fpm insta
   "web-y on Debian: sury's 8.3 build is the PPA's, not pinned"
 has "$(cat "$(y $UUC)" 2>/dev/null)" '"deb.sury.org:trixie"' "web-y on Debian: sury's origin accepted"
 
+# The keeper's own file names already hold something it does not recognise: it overwrites them, keeps each old
+# file under /var/lib/php2shell/backup (outside preferences.d and apt.conf.d, which apt reads whole), and the
+# rollback line copies it back.
+yreset
+mkdir -p "$(y /etc/apt/preferences.d)" "$(y /etc/apt/apt.conf.d)"
+OLDPIN='Package: php8.3
+Pin: origin mirror.example.org
+Pin-Priority: -1'
+OLDUU='Unattended-Upgrade::Allowed-Origins { "Example:noble"; };'
+printf '%s\n' "$OLDPIN" >"$(y $PIN83)"
+printf '%s\n' "$OLDUU" >"$(y $UUC)"
+AO=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 0 "web-y over old files: exit 0"
+for f in $PIN83 $UUC; do
+  rb=$(grep -oE "cp /var/lib/php2shell/backup/${f##*/}\.[0-9TZ]+ $f" <<<"$AO" | head -1)
+  [ -n "$rb" ] && ok "web-y over old files: rollback command for $f" || bad "web-y over old files: rollback command for $f" "$AO"
+  bk=$(awk '{print $2}' <<<"$rb")
+  eq "$(cat "$(y "${bk:-/nonexistent}")" 2>/dev/null)" "$([ "$f" = "$PIN83" ] && echo "$OLDPIN" || echo "$OLDUU")" "web-y over old files: backup of $f holds the old content"
+done
+eq "$(ls "$(y /etc/apt/preferences.d)") $(ls "$(y /etc/apt/apt.conf.d)")" "php2shell-php8.3.pref 51php2shell-ppa-origins" \
+  "web-y over old files: no backup left where apt reads"
+has "$(cat "$(y $UUC)")" '"Example:noble"; "LP-PPA-ondrej-php:noble";' "web-y over old files: the old origin kept in the new entry"
+
 # The dry run fails: the origin entry it was asked to accept is taken out again, the pin stays.
 yreset
 : >"$WORK/hosts/web-y/fail-uu"
