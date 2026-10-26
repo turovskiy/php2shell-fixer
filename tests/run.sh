@@ -137,7 +137,17 @@ for f in deb.debian.org_debian_dists_trixie_main_binary-amd64_Packages \
   security.debian.org_debian-security_dists_trixie-security_main_binary-amd64_Packages; do
   touch -d '2026-10-24 06:00:00 UTC' "$DEB/root/var/lib/apt/lists/$f"
 done
-for h in "$WORK"/hosts/*/root "$DEB/root"; do mkdir -p "$h/root"; done   # /root, where the patcher keeps its backup
+# web-m with an 8.3 build numbered like Ubuntu's fixed .13 that only the ondrej PPA serves, and whose changelog
+# names no fix: a rebuild, not Ubuntu's security build, so Ubuntu's threshold does not apply to it.
+PPA13=$WORK/web-m.ppa13
+cp -r "$WORK/hosts/web-m" "$PPA13"
+rm -rf "$PPA13/debs"
+sed -i 's/^\(ii |php8\.3-[a-z]*|\)8\.3\.6-0ubuntu0\.24\.04\.12$/\18.3.6-0ubuntu0.24.04.13/' "$PPA13/dpkg-query.txt"
+printf ' php8.3-fpm | %s | %s\n' 8.3.6-0ubuntu0.24.04.13 'https://ppa.launchpadcontent.net/ondrej/php/ubuntu noble/main amd64 Packages' \
+  >"$PPA13/madison/php8.3-fpm.txt"
+printf '%s\n' 'php8.3 (8.3.6-0ubuntu0.24.04.13) noble; urgency=medium' '  * Rebuild for the PPA' \
+  | gzip -n >"$PPA13/root/usr/share/doc/php8.3-common/changelog.Debian.gz"
+for h in "$WORK"/hosts/*/root "$DEB/root" "$PPA13/root"; do mkdir -p "$h/root"; done   # /root, where the patcher keeps its backup
 # web-y (Ubuntu 8.3 + PPA 8.4 with the ondrej PPA configured) runs the auto-update keeper several times, each
 # from this pristine copy with one thing added.
 cp -r "$WORK/hosts/web-y" "$WORK/web-y.pristine"
@@ -1157,6 +1167,15 @@ eq "$code" 0 "Debian trixie fix: exit 0"
 has "$(grep -E '^apt-get .* install ' "$STUB_LOG")" "php8.4-fpm=$DEB84" "Debian trixie fix: php8.4-fpm pinned to $DEB84"
 has "$DF" "kind=fix host=web-m branch=8.4 before=8.4.11-1 after=$DEB84 target=$DEB84 fixed=yes restart=done modules=same state=fixed" \
   "Debian trixie fix: 8.4 installed, fixed, restarted"
+rm -rf "$WORK/hosts/web-m"
+cp -a "$PPA13" "$WORK/hosts/web-m"
+PA=$(P2S_CACHE=$WORK/cache-deb bash "$S/run.sh" audit web-m)
+has "$PA" "branch=8.3 sapi=fpm installed=8.3.6-0ubuntu0.24.04.13 origin=ppa active=active cve_changelog=no verdict=unfixed reason=below-threshold target=none" \
+  "Ubuntu-numbered .13 served only by the PPA: the PPA's build, Ubuntu's threshold does not fix it"
+PF=$(P2S_CACHE=$WORK/cache-deb bash "$S/run.sh" fix web-m); code=$?
+eq "$code" 3 "Ubuntu-numbered .13 from the PPA, fix: still unfixed -> exit 3"
+has "$PF" "kind=fix host=web-m branch=8.3 before=8.3.6-0ubuntu0.24.04.13 after=8.3.6-0ubuntu0.24.04.13 target=none fixed=no restart=done modules=same state=unfixed-mitigated" \
+  "Ubuntu-numbered .13 from the PPA, fix: judged as the PPA's build, mitigated"
 rm -rf "$WORK/hosts/web-m"
 mv "$WORK/web-m.ubuntu" "$WORK/hosts/web-m"
 
