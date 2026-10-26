@@ -338,7 +338,7 @@ case ${periodic:-0} in
   0) echo "NOTE: APT::Periodic::Unattended-Upgrade is ${periodic:-unset}: unattended-upgrades does not run on its own" ;;
 esac
 if [ ${#P2S_ROLLBACK[@]} -gt 0 ]; then
-  au_end 0 state=configured periodic="${periodic:-unset}"
+  au_end 0 state=configured periodic="$(p2s_enc "${periodic:-unset}")"
 else
-  au_end 0 state=unchanged periodic="${periodic:-unset}"
+  au_end 0 state=unchanged periodic="$(p2s_enc "${periodic:-unset}")"
 fi

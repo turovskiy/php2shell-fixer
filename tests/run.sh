@@ -1386,6 +1386,11 @@ eq "$code" 1 "web-y without a cached Release file: exit 1"
 has "$AN" "Run apt-get update on the host" "web-y without a cached Release file: says what to do"
 eq "$(tree web-y)" "$TN" "web-y without a cached Release file: nothing written"
 
+# An APT::Periodic value with a space still makes one record field.
+yreset
+sed -i 's/^APT::Periodic::Unattended-Upgrade "1";$/APT::Periodic::Unattended-Upgrade "1 d";/' "$WORK/hosts/web-y/apt-config.txt"
+has "$(bash "$S/run.sh" autoupdate web-y)" "kind=keeper host=web-y state=configured periodic=1%20d" "keeper record: periodic value encoded"
+
 # packages.sury.org's Release Origin is deb.sury.org: the audit counts it as the PPA covered, like the ondrej one.
 yreset
 mkdir -p "$(y /etc/apt/apt.conf.d)"
