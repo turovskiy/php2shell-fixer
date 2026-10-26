@@ -1,0 +1,13 @@
+AH00558: apache2: Could not reliably determine the server's fully qualified domain name, using 127.0.1.1. Set the 'ServerName' directive globally to suppress this message
+VirtualHost configuration:
+127.0.0.1:8080         is a NameVirtualHost
+         default server shop.example.com (/etc/apache2/sites-enabled/shop.conf:1)
+         port 8080 namevhost shop.example.com (/etc/apache2/sites-enabled/shop.conf:1)
+                 alias www.shop.example.com
+         port 8080 namevhost blog.example.org (/etc/apache2/sites-enabled/shop.conf:6)
+ServerRoot: "/etc/apache2"
+Main DocumentRoot: "/var/www/html"
+Main ErrorLog: "/var/log/apache2/error.log"
+PidFile: "/var/run/apache2/apache2.pid"
+Define: DUMP_VHOSTS
+Define: DUMP_RUN_CFG

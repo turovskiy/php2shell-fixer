@@ -48,8 +48,8 @@ flush() { # print the current host section
   fi
   if [ ${#patches[@]} -gt 0 ]; then
     [ ${#branches[@]} -eq 0 ] || echo
-    echo '| Branch | Before | After | Target | Fixed | Restart | Modules | Result |'
-    echo '|---|---|---|---|---|---|---|---|'
+    echo '| Branch | SAPI | Before | After | Target | Fixed | Restart | Modules | Result |'
+    echo '|---|---|---|---|---|---|---|---|---|'
     printf '%s\n' "${patches[@]}"
   fi
   if [ ${#probes[@]} -gt 0 ]; then
@@ -155,8 +155,9 @@ while IFS=$'\t' read -r _ _ _ log; do
         case ${r[state]} in fixed) fs=fixed ;; *) fs="**${r[state]}**" ;; esac
         tg=${r[target]}
         [ "$tg" = none ] || [ "$tg" = - ] || tg="\`$tg\`"
-        patches+=("$(printf '| %s | `%s` | `%s` | %s | %s | %s | %s | %s |' "${r[branch]}" "${r[before]}" "${r[after]}" \
-          "$tg" "${r[fixed]}" "${r[restart]}" "${r[modules]}" "$fs")")
+        # Fix logs from before mod_php support carry no sapi field: those runs patched FPM only.
+        patches+=("$(printf '| %s | %s | `%s` | `%s` | %s | %s | %s | %s | %s |' "${r[branch]}" "${r[sapi]:-fpm}" "${r[before]}" \
+          "${r[after]}" "$tg" "${r[fixed]}" "${r[restart]}" "${r[modules]}" "$fs")")
         ;;
       probe)
         pr="- \`${r[name]}\`: ${r[before]} -> ${r[after]}"

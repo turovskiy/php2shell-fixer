@@ -786,8 +786,32 @@ eq "$(grep -E '^systemctl (reload|restart|stop) ' "$STUB_LOG")" "" "web-w fix: A
 has "$Wf" "kind=fix host=web-w branch=8.3 before=8.3.6-0ubuntu0.24.04.12 after=8.3.6-0ubuntu0.24.04.13 target=8.3.6-0ubuntu0.24.04.13 fixed=yes restart=skipped modules=same state=test-failed sapi=apache2" \
   "web-w fix: installed, but Apache left alone on the failed configtest"
 
+# One branch served by both FPM and mod_php: one pinned install, both SAPIs mitigated, tested, restarted.
+: >"$STUB_LOG"
+X=$(bash "$S/run.sh" fix web-x); code=$?
+eq "$code" 0 "web-x: FPM and mod_php of 8.3 fixed in one run, exit 0"
+INSTALL=$(grep -E '^apt-get .* install ' "$STUB_LOG")
+eq "$(grep -c . <<<"$INSTALL")" 1 "web-x: one install for the branch"
+has "$INSTALL" "php8.3-fpm=8.3.6-0ubuntu0.24.04.13" "web-x: FPM package pinned to the target"
+has "$INSTALL" "libapache2-mod-php8.3=8.3.6-0ubuntu0.24.04.13" "web-x: mod_php package pinned to the same target"
+has "$X" "kind=fix host=web-x branch=8.3 before=8.3.6-0ubuntu0.24.04.12 after=8.3.6-0ubuntu0.24.04.13 target=8.3.6-0ubuntu0.24.04.13 fixed=yes restart=done modules=same state=fixed sapi=fpm" \
+  "web-x: FPM patched and restarted"
+has "$X" "kind=fix host=web-x branch=8.3 before=8.3.6-0ubuntu0.24.04.12 after=8.3.6-0ubuntu0.24.04.13 target=8.3.6-0ubuntu0.24.04.13 fixed=yes restart=done modules=same state=fixed sapi=apache2" \
+  "web-x: mod_php patched and Apache restarted"
+eq "$(grep -E '^systemctl (restart|reload) ' "$STUB_LOG" | sort)" "$(printf 'systemctl restart apache2\nsystemctl restart php8.3-fpm')" \
+  "web-x: the pool and Apache restarted once each, no reload"
+has "$(grep -E '^(php-fpm8.3 -t|apachectl configtest)' "$STUB_LOG" | sort -u)" "$(printf 'apachectl configtest\nphp-fpm8.3 -t')" "web-x: both config tests ran"
+has "$X" "kind=mitigation host=web-x branch=8.3 sapi=apache2 ini=absent action=written upload_progress=Off overrides=0 state=mitigated" \
+  "web-x: mod_php mitigated"
+has "$X" "kind=mitigation host=web-x branch=8.3 sapi=fpm ini=absent action=written upload_progress=Off overrides=0 state=mitigated" \
+  "web-x: FPM mitigated"
+has "$X" "rm /etc/php/8.3/apache2/conf.d/99-security.ini && systemctl reload apache2" "web-x: rollback line for the mod_php ini"
+XR=$(bash "$S/report.sh" "$(ls "$P2S_CACHE"/web-x-fix-*.log)")
+has "$XR" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.12` | `8.3.6-0ubuntu0.24.04.13` | `8.3.6-0ubuntu0.24.04.13` | yes | done | same | fixed |' "report: FPM patch row"
+has "$XR" '| 8.3 | apache2 | `8.3.6-0ubuntu0.24.04.12` | `8.3.6-0ubuntu0.24.04.13` | `8.3.6-0ubuntu0.24.04.13` | yes | done | same | fixed |' "report: mod_php patch row"
+
 PR=$(bash "$S/report.sh" "$(ls "$P2S_CACHE"/web-m-fix-*.log)" "$(ls "$P2S_CACHE"/web-q-fix-*.log)" "$(ls "$P2S_CACHE"/web-t-fix-*.log)")
-has "$PR" '| 8.3 | `8.3.6-0ubuntu0.24.04.12` | `8.3.6-0ubuntu0.24.04.13` | `8.3.6-0ubuntu0.24.04.13` | yes | done | same | fixed |' "report: patch row"
+has "$PR" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.12` | `8.3.6-0ubuntu0.24.04.13` | `8.3.6-0ubuntu0.24.04.13` | yes | done | same | fixed |' "report: patch row"
 has "$PR" "- Backup before the patch: \`/root/etc-php-" "report: backup named"
 has "$PR" "- HTTP probe: every status code unchanged" "report: probe unchanged"
 has "$PR" '- **Preflight stopped the patch: held**, held: `php8.3-fpm`' "report: preflight stop"
