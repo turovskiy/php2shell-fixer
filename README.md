@@ -2,7 +2,7 @@
 
 Claude Code plugin that audits and patches PHP2Shell (CVE-2026-109618, CVE-2026-109619) on Debian and Ubuntu servers running PHP-FPM or mod_php, and keeps the CVE-2026-115560 mitigation in place.
 
-Work in progress. The plugin audits PHP-FPM and Apache mod_php hosts, patches them, and keeps the CVE-2026-115560 mitigation in place. Keeping PPA PHP updated on its own is coming next. The plan lives in [issue #1](https://github.com/turovskiy/php2shell-fixer/issues/1) and its sub-issues.
+Work in progress. The plugin audits PHP-FPM and Apache mod_php hosts, patches them, keeps the CVE-2026-115560 mitigation in place, and lets PHP from the ondrej PPA update itself. The plan lives in [issue #1](https://github.com/turovskiy/php2shell-fixer/issues/1) and its sub-issues.
 
 ## Install
 
@@ -47,10 +47,10 @@ Two commands read those logs later:
 
 ```
 bash scripts/report.sh --latest   # the newest log per server, one report
-bash scripts/next.sh --latest     # what to do next on each server: audit, fix, ensure, verify or done
+bash scripts/next.sh --latest     # what to do next on each server: audit, fix, ensure, autoupdate, verify or done
 ```
 
-Write commands (`ensure`) are never cut off by a time limit, even if a server is slow: a session killed in the middle of apt or a reload leaves the server half changed. Only the read-only audit has a limit (10 minutes per server by default). A dropped connection is another matter: if your laptop sleeps or the network goes, the server most likely stops the command where it was. For `ensure` that is harmless (run it again), but keep the connection up until it finishes.
+Write commands (`ensure`, `autoupdate`) are never cut off by a time limit, even if a server is slow: a session killed in the middle of apt or a reload leaves the server half changed. Only the read-only audit has a limit (10 minutes per server by default). A dropped connection is another matter: if your laptop sleeps or the network goes, the server most likely stops the command where it was. For `ensure` that is harmless (run it again), but keep the connection up until it finishes.
 
 ## Patch a server
 
@@ -79,6 +79,24 @@ It does not touch a `99-security.ini` someone else wrote, and it does not edit p
 This is a write on the server, so run it yourself or approve it when Claude asks.
 
 `ensure` also leaves an apt hook on the server: after every package install or upgrade, apt runs the same check again, so a PHP version you install next month gets the protection too. The hook lives in two files, `/etc/apt/apt.conf.d/99php2shell-ensure` and `/usr/local/sbin/php2shell-ensure`, and writes what it did to `/var/log/php2shell-ensure.log`. It can never make apt fail. To remove it, delete both files. The audit shows whether the hook is in place and up to date.
+
+## Keep PPA PHP updated
+
+On Ubuntu, unattended-upgrades installs security updates from Ubuntu only. PHP from the ondrej PPA stays on whatever version was installed until someone upgrades it by hand. Adding the PPA to unattended-upgrades is not enough on its own: a PHP version that came from Ubuntu would then start pulling builds from the PPA, and a PPA build with a higher number is not always a fixed one.
+
+```
+bash scripts/run.sh autoupdate <host>
+```
+
+The command does three things, in this order:
+
+1. For every PHP version installed from Ubuntu or Debian that the PPA also ships, it writes a pin that keeps the PPA builds away from it: `/etc/apt/preferences.d/php2shell-php8.3.pref` with `Pin-Priority: -1`. The `.pref` ending matters. apt reads only files in that folder with no extension or with `.pref`, and `php8.3` alone already counts as having one (`.3`).
+2. It asks apt (`apt-cache policy`) which build it would now install for every PHP package. If any package would switch between Ubuntu and the PPA, the command stops, names the PHP version and the pin that does not work, and goes no further. The pins it wrote stay: they only keep each version where it is.
+3. It adds the PPA to the list unattended-upgrades accepts (`/etc/apt/apt.conf.d/51php2shell-ppa-origins`) and runs `unattended-upgrade --dry-run` to check the PPA shows up. If it does not, that file is taken out again.
+
+If a server already has an equivalent pin or PPA entry, under any file name, the command finds it by content and writes nothing twice. A pin under a name apt skips (for example `ondrej-php.conf`) shows up in step 2, and the command tells you what to rename it to. On a server without the PPA it writes nothing. Every run ends with the commands that undo what it wrote.
+
+This is a write on the server, so run it yourself or approve it when Claude asks.
 
 ## Tests
 
