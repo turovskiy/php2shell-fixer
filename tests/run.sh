@@ -297,7 +297,7 @@ stub_aptconf_dump() {
     n=${f##*/}
     [[ $n =~ ^[A-Za-z0-9_.-]+$ ]] && [[ $n != *.* || $n == *.conf ]] || continue
     sed 's#//.*##' "$f" | tr '\n' ' ' \
-      | grep -oE 'Unattended-Upgrade::(Allowed-Origins|Origins-Pattern)[[:space:]]*\{[^}]*\}' \
+      | grep -oE 'Unattended-Upgrade::(Allowed-Origins|Origins-Pattern)[[:space:]]*\{([^}"]|"[^"]*")*\}' \
       | while read -r key rest; do
         grep -oE '"[^"]*"' <<<"$rest" | while read -r v; do printf '%s:: %s;\n' "$key" "$v"; done
       done
@@ -1069,6 +1069,82 @@ has "$AY2" "kind=pin host=web-y branch=8.3 file=$PIN83 action=present" "web-y se
 has "$AY2" "kind=uu_entry host=web-y value=LP-PPA-ondrej-php:noble file=- action=present" "web-y second run: origin entry recognised"
 has "$AY2" "kind=keeper host=web-y state=unchanged" "web-y second run: unchanged"
 hasnt "$AY2" "rm $PIN83" "web-y second run: no rollback line for files it did not write"
+
+# Someone pinned all PHP up to the PPA, in a file apt reads before the keeper's: the keeper's pin is written
+# but cannot hold 8.3, so the candidate would move. The run refuses before the origin entry.
+yreset
+mkdir -p "$(y /etc/apt/preferences.d)"
+printf 'Package: php*\nPin: origin ppa.launchpadcontent.net\nPin-Priority: 900\n' >"$(y /etc/apt/preferences.d/00ondrej-php)"
+: >"$STUB_LOG"
+AR=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 1 "web-y refused: a candidate would change origin -> exit 1"
+has "$AR" "STOP: php8.3: apt would move php8.3-fpm php8.3-common from the distro build to ppa ($SU835)" "web-y refused: names the branch, its packages and the candidate"
+has "$AR" "kind=policy host=web-y branch=8.3 origin=distro package=php8.3-fpm installed=$U83 before=$SU835 candidate=$SU835 candidate_origin=ppa moved=php8.3-fpm,php8.3-common pin=$PIN83 state=pin-ineffective" \
+  "web-y refused: candidate still the PPA's despite the pin"
+has "$AR" "kind=keeper host=web-y state=refused branches=8.3" "web-y refused: keeper record"
+[ -f "$(y $PIN83)" ] && ok "web-y refused: the pin is kept" || bad "web-y refused: the pin is kept"
+[ -e "$(y $UUC)" ] && bad "web-y refused: the origin entry is not added" || ok "web-y refused: the origin entry is not added"
+hasnt "$AR" "kind=uu_entry" "web-y refused: no origin entry record"
+eq "$(grep -c '^unattended-upgrade ' "$STUB_LOG")" 0 "web-y refused: no dry run"
+has "$AR" "rm $PIN83" "web-y refused: rollback line for the pin it wrote"
+
+# An operator's pin under a name apt skips (".conf"): recognised by content, so no second pin is written, and
+# apt-cache policy shows it does nothing.
+yreset
+mkdir -p "$(y /etc/apt/preferences.d)"
+printf 'Package: php8.3*\nPin: origin ppa.launchpadcontent.net\nPin-Priority: -1\n' >"$(y /etc/apt/preferences.d/ondrej-php.conf)"
+AI=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 1 "web-y ignored pin: exit 1"
+has "$AI" "kind=pin host=web-y branch=8.3 file=/etc/apt/preferences.d/ondrej-php.conf action=present" "web-y ignored pin: recognised by content"
+eq "$(ls "$(y /etc/apt/preferences.d)")" "ondrej-php.conf" "web-y ignored pin: no duplicate pin written"
+has "$AI" "candidate=$SU835 candidate_origin=ppa moved=php8.3-fpm,php8.3-common pin=/etc/apt/preferences.d/ondrej-php.conf state=pin-ineffective" \
+  "web-y ignored pin: detected as ineffective, the candidate still the PPA's"
+has "$AI" "mv /etc/apt/preferences.d/ondrej-php.conf /etc/apt/preferences.d/ondrej-php.conf.pref" "web-y ignored pin: says how to make apt read it"
+[ -e "$(y $UUC)" ] && bad "web-y ignored pin: no origin entry" || ok "web-y ignored pin: no origin entry"
+
+# Equivalent config already in place under other names, in other forms: nothing written.
+yreset
+mkdir -p "$(y /etc/apt/preferences.d)" "$(y /etc/apt/apt.conf.d)"
+printf 'Explanation: Ubuntu PHP stays Ubuntu\nPackage: php8.3*\nPin: release o=LP-PPA-ondrej-php\nPin-Priority: -10\n' \
+  >"$(y /etc/apt/preferences.d/ubuntu-php)"
+printf '%s\n' 'Unattended-Upgrade::Origins-Pattern {' '  "origin=LP-PPA-ondrej-php,codename=${distro_codename}";' '};' \
+  >"$(y /etc/apt/apt.conf.d/60ondrej-php)"
+TE=$(tree web-y)
+AE=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 0 "web-y equivalent config: exit 0"
+eq "$(tree web-y)" "$TE" "web-y equivalent config: no file written"
+has "$AE" "kind=pin host=web-y branch=8.3 file=/etc/apt/preferences.d/ubuntu-php action=present" "web-y equivalent config: release o= pin recognised"
+has "$AE" "kind=uu_entry host=web-y value=LP-PPA-ondrej-php:noble file=- action=present" "web-y equivalent config: Origins-Pattern entry recognised"
+has "$AE" "candidate=$U83 candidate_origin=distro moved=- pin=/etc/apt/preferences.d/ubuntu-php state=kept" "web-y equivalent config: and it holds 8.3"
+has "$AE" "kind=keeper host=web-y state=unchanged" "web-y equivalent config: unchanged"
+
+# The dry run fails: the origin entry it was asked to accept is taken out again, the pin stays.
+yreset
+: >"$WORK/hosts/web-y/fail-uu"
+AD=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 1 "web-y dry run fails: exit 1"
+[ -e "$(y $UUC)" ] && bad "web-y dry run fails: origin entry removed again" || ok "web-y dry run fails: origin entry removed again"
+[ -f "$(y $PIN83)" ] && ok "web-y dry run fails: the pin stays" || bad "web-y dry run fails: the pin stays"
+has "$AD" "kind=uu_entry host=web-y value=LP-PPA-ondrej-php:noble file=$UUC action=removed" "web-y dry run fails: removal recorded"
+has "$AD" "kind=keeper host=web-y state=dryrun-failed" "web-y dry run fails: keeper record"
+hasnt "$AD" "rm $UUC" "web-y dry run fails: no rollback line for the removed entry"
+has "$AD" "rm $PIN83" "web-y dry run fails: rollback line for the pin"
+
+# No cached Release file: the Origin to accept is unknown, so nothing is written.
+yreset
+rm "$(y /var/lib/apt/lists/ppa.launchpadcontent.net_ondrej_php_ubuntu_dists_noble_InRelease)"
+TN=$(tree web-y)
+AN=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 1 "web-y without a cached Release file: exit 1"
+has "$AN" "Run apt-get update on the host" "web-y without a cached Release file: says what to do"
+eq "$(tree web-y)" "$TN" "web-y without a cached Release file: nothing written"
+
+yreset
+TN=$(tree web-y)
+AU=$(STUB_UID=1000 bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 1 "autoupdate not root: exit 1"
+has "$AU" "STOP: autoupdate must run as root" "autoupdate not root: says why"
+eq "$(tree web-y)" "$TN" "autoupdate not root: nothing written"
 
 echo "▸ runner"
 has "$(bash "$S/run.sh" bundle audit | head -3)" "Fixed-build thresholds" "bundle starts with the version data"
