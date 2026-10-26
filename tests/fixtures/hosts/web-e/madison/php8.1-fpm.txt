@@ -1,0 +1,2 @@
+ php8.1-fpm | 8.1.32-1+ubuntu22.04.1+deb.sury.org+1 | https://ppa.launchpadcontent.net/ondrej/php/ubuntu jammy/main amd64 Packages
+ php8.1-fpm | 8.1.2-1ubuntu2.28 | http://security.ubuntu.com/ubuntu jammy-security/main amd64 Packages

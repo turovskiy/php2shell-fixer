@@ -22,6 +22,25 @@ p2s_origin() {
   esac
 }
 
+# Origin of an apt list file in /var/lib/apt/lists, by name, matching p2s_origin:
+# ppa.launchpadcontent.net_ondrej_php_ubuntu_dists_noble_main_binary-amd64_Packages -> ppa
+# mirrors.digitalocean.com_ubuntu_dists_noble-security_main_binary-amd64_Packages -> distro
+p2s_list_origin() {
+  case ${1##*/} in
+    *sury* | *ondrej*) echo ppa ;;
+    *_ubuntu_dists_* | *_debian_dists_* | *debian-security_dists_*) echo distro ;;
+    *) echo other ;;
+  esac
+}
+
+# Are apt lists dated $1 (UTC ISO time, or "unknown") too old to offer the fixed builds? Prints yes|no|unknown.
+p2s_lists_stale() {
+  case $1 in
+    unknown | '') echo unknown ;;
+    *) [[ ${1%%T*} < $P2S_FIXES_RELEASED ]] && echo yes || echo no ;;
+  esac
+}
+
 # Upstream part of a Debian version: 1:7.4.33-24+ubuntu24.04.1+deb.sury.org+1 -> 7.4.33
 p2s_upstream() {
   local v=${1#*:}
@@ -51,5 +70,30 @@ p2s_verdict() {
     echo "unfixed below-threshold"
   else
     echo "unfixed no-cve-in-changelog"
+  fi
+}
+
+# Target build for a branch. Prints "<version|none> <reason>".
+# $1 installed version, $2 its origin, $3 its verdict; then one "version|origin|verdict" per build apt offers.
+# A build stays with its origin: a PPA version can sort above a fixed Ubuntu revision and still be unfixed.
+p2s_target() {
+  local installed=$1 origin=$2 verdict=$3 best="" c v o d
+  shift 3
+  if [ "$verdict" = fixed ]; then
+    echo "none installed-fixed"
+    return
+  fi
+  for c in "$@"; do
+    IFS='|' read -r v o d <<<"$c"
+    [ "$o" = "$origin" ] && [ "$d" = fixed ] || continue
+    dpkg --compare-versions "$v" gt "$installed" || continue
+    if [ -z "$best" ] || dpkg --compare-versions "$v" gt "$best"; then best=$v; fi
+  done
+  if [ -n "$best" ]; then
+    echo "$best fixed-candidate"
+  elif [ "$origin" = distro ]; then
+    echo "none fixed-distro-build-not-in-cached-lists"
+  else
+    echo "none no-fixed-build-in-cached-lists"
   fi
 }
