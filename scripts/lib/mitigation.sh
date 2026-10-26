@@ -86,14 +86,26 @@ p2s_fpm_overrides() { # $1 branch
   done
 }
 
-# Apache-level overrides of session.upload_progress.enabled, in the same format as p2s_fpm_overrides with
-# pool "-". Apache reads them for mod_php only. Scans the files Debian's apache2.conf includes: apache2.conf
-# and *.conf in mods-enabled, conf-enabled and sites-enabled, read through their symlinks. Apache directive
-# names are case-insensitive; .htaccess files are not scanned.
-p2s_apache_overrides() {
-  local a f
+# The Apache config files, one per line: every file Apache reads, from its own include dump (apachectl -t
+# -D DUMP_INCLUDES, so a custom Include counts), else the files Debian's apache2.conf includes: apache2.conf
+# and *.conf in mods-enabled, conf-enabled and sites-enabled. Paths carry the root prefix.
+p2s_apache_conf_files() {
+  local a out f
+  if out=$(apachectl -t -D DUMP_INCLUDES </dev/null 2>/dev/null) && grep -q '^Included configuration files:' <<<"$out"; then
+    sed -nE 's/^[[:space:]]*\((\*|[0-9]+)\) (\/.*)$/\2/p' <<<"$out" | awk '!seen[$0]++' \
+      | while IFS= read -r f; do p2s_path "$f"; echo; done
+    return
+  fi
   a=$(p2s_path /etc/apache2)
-  for f in "$a/apache2.conf" "$a"/mods-enabled/*.conf "$a"/conf-enabled/*.conf "$a"/sites-enabled/*.conf; do
+  printf '%s\n' "$a/apache2.conf" "$a"/mods-enabled/*.conf "$a"/conf-enabled/*.conf "$a"/sites-enabled/*.conf
+}
+
+# Apache-level overrides of session.upload_progress.enabled, in the same format as p2s_fpm_overrides with
+# pool "-". Apache reads them for mod_php only. Scans the files of p2s_apache_conf_files, read through their
+# symlinks. Apache directive names are case-insensitive; .htaccess files are not scanned.
+p2s_apache_overrides() {
+  local f
+  while IFS= read -r f; do
     [ -f "$f" ] || continue
     awk -v file="$f" '
       tolower($1) ~ /^php_(admin_)?(value|flag)$/ && $2 == "session.upload_progress.enabled" {
@@ -101,7 +113,7 @@ p2s_apache_overrides() {
         enables = (tolower(value) ~ /^(1|on|true|yes)$/) ? "yes" : "no"
         printf "%s|%d|-|%s|%s|%s\n", file, NR, tolower($1), value, enables
       }' "$f"
-  done
+  done < <(p2s_apache_conf_files)
 }
 
 # Overrides that apply to a SAPI: pool configs for FPM, Apache config for a mod_php Apache loads.

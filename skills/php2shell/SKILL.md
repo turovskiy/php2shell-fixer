@@ -68,7 +68,7 @@ The audit's last section tells the operator how to patch; report these alongside
 | `not-mitigated` | The SAPI reports On |
 | `unknown` | The SAPI binary gave no answer |
 
-The Apache scan reads `apache2.conf` and the `*.conf` files in `mods-enabled`, `conf-enabled` and `sites-enabled`. `.htaccess` files are not scanned, so a mod_php host with `AllowOverride` set can still re-enable upload progress per directory: say so when reporting such a host as mitigated.
+The Apache scan reads every file Apache's own include dump lists (`apachectl -t -D DUMP_INCLUDES`, so a custom `Include` counts); when the dump fails, `apache2.conf` and the `*.conf` files in `mods-enabled`, `conf-enabled` and `sites-enabled`. `.htaccess` files are not scanned, so a mod_php host with `AllowOverride` set can still re-enable upload progress per directory: say so when reporting such a host as mitigated.
 
 `ini=legacy` is a file written by the earlier fix.sh; ensure adopts it unchanged when it already turns upload progress off.
 

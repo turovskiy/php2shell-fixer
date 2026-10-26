@@ -480,8 +480,29 @@ case $1 in
 esac'
 for b in 7.4 8.1 8.2 8.3 8.4 8.5; do stub "php-fpm$b" "$SAPI_STUB"; stub "php-cgi$b" "$SAPI_STUB"; stub "php$b" "$SAPI_STUB"; done
 # apachectl: absent (127) without /etc/apache2 in the fake root; "configtest" fails on fail-configtest in the
-# host fixture; "-S" prints the host's apachectl-S.txt, the vhost dump as Apache prints it.
+# host fixture; "-S" prints the host's apachectl-S.txt, the vhost dump as Apache prints it; "-t -D
+# DUMP_INCLUDES" follows Include and IncludeOptional from apache2.conf as Apache does (globs, paths relative to
+# /etc/apache2) and prints every file read, "(*)" for the main one and the including line for the others,
+# indented by depth; fail-dump-includes makes it fail as on a broken config.
 stub apachectl '[ -d "$P2S_ROOT/etc/apache2" ] || { echo "apachectl: command not found" >&2; exit 127; }
+if [ "$1" = -t ] && [ "${3:-}" = DUMP_INCLUDES ]; then
+  [ -e "$P2S_STUB/fail-dump-includes" ] && { echo "AH00526: Syntax error on line 4 of /etc/apache2/apache2.conf:" >&2; exit 1; }
+  inc() { # inc <file> <depth> <label>
+    local n=0 line kw pat g
+    printf "%*s(%s) %s\n" $(($2 * 2)) "" "$3" "${1#"$P2S_ROOT"}"
+    while IFS= read -r line; do
+      n=$((n + 1))
+      read -r kw pat _ <<<"$line"
+      case ${kw,,} in include | includeoptional) ;; *) continue ;; esac
+      [[ $pat == /* ]] || pat=/etc/apache2/$pat
+      for g in $P2S_ROOT$pat; do [ -f "$g" ] && inc "$g" $(($2 + 1)) "$n"; done
+    done <"$1"
+  }
+  echo "Included configuration files:"
+  inc "$P2S_ROOT/etc/apache2/apache2.conf" 1 "*"
+  echo "Syntax OK" >&2
+  exit 0
+fi
 case $1 in
   configtest)
     if [ -e "$P2S_STUB/fail-configtest" ]; then
@@ -499,7 +520,7 @@ export TMPDIR=$WORK/hosttmp
 mkdir -p "$TMPDIR"
 
 # Calls an audit may make; anything else in the stub log is a write or a package operation.
-READ_ONLY='^(ssh (-o [^ ]+ )*[^ ]+ bash -s|hostname ?|dpkg-query .*|systemctl is-active [^ ]+|systemctl show -p ActiveEnterTimestamp --value [^ ]+|dpkg --compare-versions .*|apt-cache madison [^ ]+|apt-get download -q [^ ]+|dpkg-deb --fsys-tarfile [^ ]+|php-(fpm|cgi)[0-9.]+ -i|php[0-9.]+ -c [^ ]+ -i|apt-mark showhold|apt-config dump|nginx -T|apt-helper .* download-file [^ ]+ [^ ]+)$'
+READ_ONLY='^(ssh (-o [^ ]+ )*[^ ]+ bash -s|hostname ?|apachectl -t -D DUMP_INCLUDES|dpkg-query .*|systemctl is-active [^ ]+|systemctl show -p ActiveEnterTimestamp --value [^ ]+|dpkg --compare-versions .*|apt-cache madison [^ ]+|apt-get download -q [^ ]+|dpkg-deb --fsys-tarfile [^ ]+|php-(fpm|cgi)[0-9.]+ -i|php[0-9.]+ -c [^ ]+ -i|apt-mark showhold|apt-config dump|nginx -T|apt-helper .* download-file [^ ]+ [^ ]+)$'
 fingerprint() { (cd "$WORK/hosts" && find . -type f -exec md5sum {} + | sort); }
 
 echo "▸ verdict (installed build)"
@@ -847,6 +868,22 @@ has "$V" "kind=mitigation host=web-v branch=7.4 sapi=apache2 ini=absent action=w
   "web-v: 7.4 not loaded -> written, nothing reloaded for it, no Apache overrides counted"
 eq "$(grep -E '^systemctl (reload|restart|stop|start) ' "$STUB_LOG")" "systemctl reload apache2" "web-v: Apache reloaded once, nothing restarted"
 has "$V" "rm /etc/php/8.3/apache2/conf.d/99-security.ini && systemctl reload apache2" "web-v: rollback line reloads Apache"
+
+# A site config pulled in by a custom Include outside the Debian layout: Apache's own include dump finds it.
+# Without a working dump (a broken config), the scan falls back to the Debian globs.
+AI=$WORK/apache-inc
+cp -r "$WORK/hosts/web-v" "$AI"
+mkdir -p "$AI/root/etc/apache2/custom"
+echo 'Include /etc/apache2/custom/*.conf' >>"$AI/root/etc/apache2/apache2.conf"
+printf '%s\n' '<Directory /var/www/legacy>' '  php_admin_flag session.upload_progress.enabled on' '</Directory>' >"$AI/root/etc/apache2/custom/legacy.conf"
+OV=$(P2S_ROOT=$AI/root P2S_STUB=$AI p2s_apache_overrides)
+has "$OV" "$AI/root/etc/apache2/custom/legacy.conf|2|-|php_admin_flag|on|yes" "Apache overrides: a custom Include is scanned"
+has "$OV" "$AI/root/etc/apache2/sites-enabled/shop.conf|6|-|php_admin_flag|on|yes" "Apache overrides: enabled sites still scanned"
+hasnt "$OV" "old.conf" "Apache overrides: a site that is not enabled is still not scanned"
+: >"$AI/fail-dump-includes"
+OV=$(P2S_ROOT=$AI/root P2S_STUB=$AI p2s_apache_overrides)
+hasnt "$OV" "legacy.conf" "Apache overrides without a working include dump: Debian globs only"
+has "$OV" "$AI/root/etc/apache2/sites-enabled/shop.conf|6|" "Apache overrides without a working include dump: enabled sites scanned"
 
 BEFORE_ROOT=$(fingerprint)
 NR=$(STUB_UID=1000 bash "$S/run.sh" ensure web-h); code=$?
