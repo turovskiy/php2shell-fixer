@@ -42,7 +42,7 @@ au_end() { # $1 exit code, then the fields of the keeper record
 
 releases=$(p2s_ppa_releases)
 if [ -z "$releases" ]; then
-  echo "no ondrej/sury PPA source: nothing to keep, nothing written"
+  echo "no ondrej/sury PHP PPA source: nothing to keep, nothing written"
   au_end 0 state=no-ppa
 fi
 

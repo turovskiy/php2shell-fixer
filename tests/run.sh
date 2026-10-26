@@ -1145,6 +1145,19 @@ has "$AE" "kind=uu_entry host=web-y value=LP-PPA-ondrej-php:noble file=- action=
 has "$AE" "candidate=$U83 candidate_origin=distro moved=- pin=/etc/apt/preferences.d/ubuntu-php state=kept" "web-y equivalent config: and it holds 8.3"
 has "$AE" "kind=keeper host=web-y state=unchanged" "web-y equivalent config: unchanged"
 
+# The ondrej/nginx PPA as well: its Release file is cached, but its packages are not PHP. Accepting its origin
+# would let unattended-upgrades move nginx to it, so the keeper leaves that source out.
+yreset
+printf 'deb https://ppa.launchpadcontent.net/ondrej/nginx/ubuntu noble main\n' >"$(y /etc/apt/sources.list.d/ondrej-nginx.list)"
+sed 's/LP-PPA-ondrej-php/LP-PPA-ondrej-nginx/; s/PPA for PHP/PPA for nginx/' \
+  "$(y /var/lib/apt/lists/ppa.launchpadcontent.net_ondrej_php_ubuntu_dists_noble_InRelease)" \
+  >"$(y /var/lib/apt/lists/ppa.launchpadcontent.net_ondrej_nginx_ubuntu_dists_noble_InRelease)"
+AG=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 0 "web-y with the ondrej/nginx PPA too: exit 0"
+eq "$(grep -o 'Allowed-Origins.*' "$(y $UUC)" 2>/dev/null)" 'Allowed-Origins { "LP-PPA-ondrej-php:noble"; };' \
+  "web-y with the ondrej/nginx PPA too: only the PHP PPA's origin accepted"
+hasnt "$AG" "ondrej/nginx" "web-y with the ondrej/nginx PPA too: the nginx PPA is not a PHP source"
+
 # The dry run fails: the origin entry it was asked to accept is taken out again, the pin stays.
 yreset
 : >"$WORK/hosts/web-y/fail-uu"

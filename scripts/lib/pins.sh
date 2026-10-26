@@ -8,14 +8,17 @@ p2s_pin_file() { echo "$P2S_PIN_DIR/php2shell-php$1.pref"; }   # $1 branch
 # The origin entry. apt.conf.d takes names with no extension or ".conf"; this one has none.
 P2S_UU_CONF=/etc/apt/apt.conf.d/51php2shell-ppa-origins
 
-# The PPA sources with what the cached Release file says about them, one "uri|suite|site|origin|label" per
-# line ("-" when apt has no cached Release file for the source). Origin and Label may hold spaces.
+# The PPA's PHP sources with what the cached Release file says about them, one "uri|suite|site|origin|label"
+# per line ("-" when apt has no cached Release file for the source). Origin and Label may hold spaces. Only
+# ondrej/php and packages.sury.org/php: the same people's nginx and Apache PPAs ship no PHP, and accepting
+# their origin would let unattended-upgrades move nginx or Apache to them.
 p2s_ppa_releases() {
   local file uri suite site lists cached origin label
   lists=$(p2s_path /var/lib/apt/lists)
   while IFS='|' read -r file uri suite; do
     [ -n "$uri" ] || continue
     uri=${uri%/}
+    case $uri in */ondrej/php | */ondrej/php/* | *://packages.sury.org/php | *://packages.sury.org/php/*) ;; *) continue ;; esac
     site=${uri#*://}
     site=${site%%/*}
     cached=$lists/$(p2s_inrelease_name "$uri" "$suite")

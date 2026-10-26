@@ -29,3 +29,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Хук apt виконує `ensure`, навіть коли файл журналу не вдається відкрити (#8).
 - Аудит зараховує до покритих unattended-upgrades і джерело `packages.sury.org` (Origin `deb.sury.org`), а не лише PPA ondrej (#10).
 - HTTP-проба патча питає vhost Apache на його власному порту й адресі: `443` через https, будь-який інший порт через http, тож vhost на `*:80` чи `127.0.0.1:8080` більше не дає `000` до і після, що читалося як "без змін" (#9).
+- `autoupdate` додає до unattended-upgrades лише PHP-джерела (`ondrej/php`, `packages.sury.org/php`): PPA `ondrej/nginx` чи `ondrej/apache2` на тому ж хості більше не отримує запису, тож unattended-upgrades не оновить з нього nginx чи Apache (#10).
