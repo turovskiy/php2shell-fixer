@@ -13,7 +13,8 @@ Scripts live in `${CLAUDE_PLUGIN_ROOT}/scripts/`. Each run prints a human sectio
 
 1. **Audit** every host the operator names: `bash ${CLAUDE_PLUGIN_ROOT}/scripts/run.sh audit <host>`, where host is an ssh alias or `user@address`. The audit is read-only. When the permission layer denies the call, hand the operator the same line as a `!` command and read its output back. Done when each host either printed `log: <path>` with a host record in that log, or exited 255 (ssh failed: the host is unreachable).
 2. **Report**: `bash ${CLAUDE_PLUGIN_ROOT}/scripts/report.sh <log>...` over the logs from step 1. Show the operator the tables and list unreachable hosts beside them. Done when every host from step 1 has a section or an unreachable line.
-3. **Stop at the report.** This version audits only: patching, the upload-progress mitigation and auto-updates are not built yet. For each `unfixed` branch, name the host, branch and reason.
+3. **Confirm the restart for every `fixed` branch.** The verdict judges the installed package; a running PHP-FPM keeps executing the build it started with until it is restarted, so a host can report `fixed` and still serve the vulnerable code. The audit does not check this yet. Per `fixed` branch, compare the service start (`systemctl show -p ActiveEnterTimestamp --value php<X.Y>-fpm`) with the package install time (`stat -c %y /var/lib/dpkg/info/php<X.Y>-fpm.list`), both read-only; hand them to the operator as `!` commands when the call is denied. Done when each `fixed` branch is either "started after install" or reported as "installed, restart not confirmed". Call a host protected only when all its branches are fixed and started after install.
+4. **Stop at the report.** This version audits only: patching, the upload-progress mitigation and auto-updates are not built yet. For each `unfixed` branch, name the host, branch and reason.
 
 ## Verdict reasons
 

@@ -33,6 +33,8 @@ Ask Claude to check a server for PHP2Shell, or run the scripts yourself:
 
 Why not just `php -v`? Ubuntu ships the fix as `8.3.6-0ubuntu0.24.04.13`, and `php -v` still says `8.3.6`. The audit looks at the package version and its changelog instead.
 
+"fixed" in the report is about the installed package, not the running service. PHP-FPM keeps running the build it started with until it is restarted, so check that the service started after the package was installed before you tell anyone the server is safe: `systemctl show -p ActiveEnterTimestamp php8.3-fpm` against `stat -c %y /var/lib/dpkg/info/php8.3-fpm.list`. The audit will check this itself later ([#5](https://github.com/turovskiy/php2shell-fixer/issues/5)).
+
 ## Tests
 
 ```
