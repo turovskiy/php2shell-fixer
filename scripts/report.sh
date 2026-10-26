@@ -76,7 +76,7 @@ flush() { # print the current host section
   # A preflight stop leaves no branch rows, but the host has PHP: say nothing rather than "no PHP". A keeper
   # run is about apt, not about the SAPIs.
   [ ${#branches[@]} -gt 0 ] || [ ${#mitigations[@]} -gt 0 ] || [ ${#patches[@]} -gt 0 ] || [ "$mode_seen" = fix ] \
-    || [ "$mode_seen" = autoupdate ] || echo 'No PHP-FPM or PHP-CGI installed.'
+    || [ "$mode_seen" = autoupdate ] || echo 'No PHP-FPM, mod_php or PHP-CGI installed.'
   if [ ${#facts[@]} -gt 0 ]; then
     printf '\n### Host facts\n\n'
     printf '%s\n' "${facts[@]}"

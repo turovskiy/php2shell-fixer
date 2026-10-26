@@ -1102,7 +1102,7 @@ has "$PR" "- Backup before the patch: \`/root/etc-php-" "report: backup named"
 has "$PR" "- HTTP probe: every status code unchanged" "report: probe unchanged"
 has "$PR" '- **Preflight stopped the patch: held**, held: `php8.3-fpm`' "report: preflight stop"
 has "$PR" '- `shop.example.com`: 200 -> 502 - **changed**' "report: changed site"
-hasnt "$PR" "No PHP-FPM or PHP-CGI installed." "report: a fix log is not an empty host"
+hasnt "$PR" "No PHP-FPM, mod_php or PHP-CGI installed." "report: a fix log is not an empty host"
 
 echo "▸ autoupdate"
 # A host's whole tree, directories included: the keeper must not even create one where it has nothing to do.
@@ -1494,7 +1494,7 @@ has "$R" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.13` | distro | active | unknown | 
 has "$R" '| 7.4 | fpm | `1:7.4.33-31+ubuntu24.04.1+deb.sury.org+1` | ppa | active | unknown | yes | fixed | changelog |' "report: web-a 7.4 row"
 has "$R" '| 8.4 | fpm | `8.4.17-1+ubuntu24.04.1+deb.sury.org+1` | ppa | active | unknown | no | **unfixed** | below-threshold |' "report: unfixed in bold"
 has "$R" "## web-c (debian-12)" "report: web-c section"
-has "$R" "No PHP-FPM or PHP-CGI installed." "report: host without a web SAPI"
+has "$R" "No PHP-FPM, mod_php or PHP-CGI installed." "report: host without a web SAPI"
 has "$R" '| 8.3 | fpm | `8.3.6-0ubuntu0.24.04.12` | distro | inactive | not-running | no | **unfixed** | below-threshold | `8.3.6-0ubuntu0.24.04.13` |' \
   "report: target column with the target build"
 has "$R" '| below-threshold | none (no-fixed-build-in-cached-lists) |' "report: no target shows its reason"
@@ -1509,7 +1509,7 @@ has "$VR" '- php8.3 Apache: `/etc/apache2/sites-enabled/shop.conf:6` php_admin_f
   "report: Apache override listed as Apache's, with file and line"
 AYR=$(bash "$S/report.sh" "$LOG_AY")
 has "$AYR" "## web-y (ubuntu-24.04)" "report: keeper log has its host section"
-hasnt "$AYR" "No PHP-FPM or PHP-CGI installed." "report: a keeper log is not an empty host"
+hasnt "$AYR" "No PHP-FPM, mod_php or PHP-CGI installed." "report: a keeper log is not an empty host"
 has "$AYR" '| 8.3 | distro | php8.3-fpm | `8.3.6-0ubuntu0.24.04.13` | `8.3.35-1+ubuntu24.04.1+deb.sury.org+1` (ppa) | `8.3.6-0ubuntu0.24.04.13` (distro) | `/etc/apt/preferences.d/php2shell-php8.3.pref` | kept |' \
   "report: keeper row for the pinned distro branch"
 has "$AYR" '| 8.4 | ppa | php8.4-fpm | `8.4.17-1+ubuntu24.04.1+deb.sury.org+1` | `8.4.27-1+ubuntu24.04.1+deb.sury.org+1` (ppa) | `8.4.27-1+ubuntu24.04.1+deb.sury.org+1` (ppa) | - | kept |' \
@@ -1535,7 +1535,7 @@ MR=$(bash "$S/report.sh" "$(grep -l 'kind=mitigation' "$P2S_CACHE"/web-h-ensure-
 has "$MR" '| 8.3 | fpm | absent | written | Off | 1 | **override** |' "report: mitigation row with the override state"
 has "$MR" '- php8.3 pool `www`: `/etc/php/8.3/fpm/pool.d/www.conf:6` php_admin_flag = on - **re-enables it**' "report: override listed with file and line"
 has "$MR" '| 8.3 | cgi | foreign | inspected | On | 0 | **foreign** |' "report: foreign file in the audit"
-hasnt "$MR" "No PHP-FPM or PHP-CGI installed." "report: ensure log without branch rows still has its table"
+hasnt "$MR" "No PHP-FPM, mod_php or PHP-CGI installed." "report: ensure log without branch rows still has its table"
 has "$(bash "$S/report.sh" "$WORK/old.log")" '| fixed | distro-threshold | - |' "report: log from before targets shows -"
 has "$R" '| none (no-fixed-build-in-cached-lists) | **2026-09-30, older than the fixes** |' "report: stale lists flagged next to the missing target"
 has "$R" '| `8.3.6-0ubuntu0.24.04.13` | 2026-10-24 |' "report: fresh lists show their date"
