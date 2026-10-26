@@ -105,6 +105,9 @@ echo 1 >"$WORK/hosts/web-u/drop-after"
 cp -r "$WORK/hosts/web-l" "$WORK/hosts/web-w"
 : >"$WORK/hosts/web-w/fail-configtest"
 for h in "$WORK"/hosts/*/root; do mkdir -p "$h/root"; done   # /root, where the patcher keeps its backup
+# web-y (Ubuntu 8.3 + PPA 8.4 with the ondrej PPA configured) runs the auto-update keeper several times, each
+# from this pristine copy with one thing added.
+cp -r "$WORK/hosts/web-y" "$WORK/web-y.pristine"
 
 # Stubs, first on PATH. ssh runs the streamed program locally against the named host's fake root.
 REAL_DPKG=$(command -v dpkg)
@@ -171,8 +174,158 @@ fi
 [ "$1" = show ] && [ -f "$P2S_STUB/started.txt" ] && sed -n "s/^${!#} //p" "$P2S_STUB/started.txt"
 exit 0'
 stub dpkg "exec $REAL_DPKG \"\$@\""
-stub apt-cache '[ "$1" = madison ] && [ -f "$P2S_STUB/madison/$2.txt" ] && cat "$P2S_STUB/madison/$2.txt"
-exit 0'
+# apt as the auto-update keeper sees it: preferences, candidates, apt.conf.d, unattended-upgrades. Shared by the
+# apt-cache, apt-config and unattended-upgrade stubs; not on PATH, so it logs nothing itself.
+export P2S_REAL_DPKG=$REAL_DPKG P2S_STUBLIB=$WORK/stublib
+mkdir -p "$P2S_STUBLIB"
+cat >"$P2S_STUBLIB/apt.sh" <<'EOF'
+# The files apt reads as preferences: /etc/apt/preferences, then preferences.d/* in name order. As in
+# apt_preferences(5), a preferences.d file counts only when its name has no extension or the extension "pref"
+# and holds only letters, digits, "_", "-" and "."; apt ignores every other name. "php8.3" has an extension.
+stub_prefs_files() {
+  local f n
+  [ -f "$P2S_ROOT/etc/apt/preferences" ] && echo "$P2S_ROOT/etc/apt/preferences"
+  for f in "$P2S_ROOT"/etc/apt/preferences.d/*; do
+    [ -f "$f" ] || continue
+    n=${f##*/}
+    [[ $n =~ ^[A-Za-z0-9_.-]+$ ]] || continue
+    [[ $n != *.* || $n == *.pref ]] && echo "$f"
+  done
+}
+# Stanzas in the order apt reads them, one "packages<TAB>pin<TAB>priority" per line.
+stub_prefs_stanzas() {
+  local f
+  stub_prefs_files | while read -r f; do
+    awk 'function out() { if (pk != "" && pin != "" && pr != "") print pk "\t" pin "\t" pr; pk = pin = pr = "" }
+      /^[[:space:]]*$/ { out(); next }
+      /^Package:/ { pk = $0; sub(/^Package:[[:space:]]*/, "", pk) }
+      /^Pin:/ { pin = $0; sub(/^Pin:[[:space:]]*/, "", pin) }
+      /^Pin-Priority:/ { pr = $2 }
+      END { out() }' "$f"
+  done
+}
+# A field of the cached Release file of a source: $1 uri, $2 suite, $3 field.
+stub_release_field() {
+  local u=${1#*://}
+  u=${u%/}
+  sed -nE "s/^$3: (.*)\$/\\1/p" "$P2S_ROOT/var/lib/apt/lists/${u//\//_}_dists_$2_InRelease" 2>/dev/null | head -1
+}
+# Does a Pin line match a build from a source? $1 pin, $2 version, $3 uri, $4 suite.
+stub_pin_matches() {
+  local pin=$1 ver=$2 uri=$3 suite=$4 site kv k v kvs
+  site=${uri#*://}
+  site=${site%%/*}
+  case $pin in
+    origin\ *) v=${pin#origin }; [ "${v//\"/}" = "$site" ] ;;
+    version\ *) [[ $ver == ${pin#version } ]] ;;
+    release\ *)
+      IFS=, read -ra kvs <<<"${pin#release }"
+      for kv in "${kvs[@]}"; do
+        k=${kv%%=*} v=${kv#*=}
+        k=${k// /} v=${v//\"/}
+        case $k in
+          o | origin) [ "$(stub_release_field "$uri" "$suite" Origin)" = "$v" ] ;;
+          l | label) [ "$(stub_release_field "$uri" "$suite" Label)" = "$v" ] ;;
+          a | archive | n | codename) [ "$suite" = "$v" ] ;;
+          *) false ;;
+        esac || return 1
+      done ;;
+    *) false ;;
+  esac
+}
+# Priority of one build from one source: the first stanza whose Package and Pin match it, else 500.
+stub_priority() { # $1 package, $2 version, $3 uri, $4 suite
+  local pk pin pr pats p
+  while IFS=$'\t' read -r pk pin pr; do
+    read -ra pats <<<"$pk"
+    for p in "${pats[@]}"; do
+      if [[ $p == /*/ ]]; then [[ $1 =~ ${p:1:-1} ]] || continue
+      else [[ $1 == $p ]] || continue
+      fi
+      stub_pin_matches "$pin" "$2" "$3" "$4" && { echo "$pr"; return; }
+      break
+    done
+  done < <(stub_prefs_stanzas)
+  echo 500
+}
+# apt-cache policy <package>: the builds from madison/<package>.txt with their priorities, the installed one from
+# dpkg-query.txt. The candidate is the build with the highest priority (never a negative one), the higher
+# version on a tie; a build older than the installed one does not replace it below priority 1000.
+stub_policy() {
+  local pkg=$1 inst v src uri dist pr best="" bestp="" rows=() r
+  local -A prio
+  inst=$(awk -F'|' -v p="$pkg" '$1 ~ /^ii/ && $2 == p {print $3}' "$P2S_STUB/dpkg-query.txt")
+  while IFS='|' read -r _ v src; do
+    v=${v// /}
+    [ -n "$v" ] || continue
+    read -r uri dist _ <<<"$src"
+    pr=$(stub_priority "$pkg" "$v" "$uri" "${dist%%/*}")
+    rows+=("$v|$pr|$uri|$dist")
+    if [ -z "${prio[$v]:-}" ] || [ "$pr" -gt "${prio[$v]}" ]; then prio[$v]=$pr; fi
+  done 2>/dev/null <"$P2S_STUB/madison/$pkg.txt"
+  [ -n "$inst" ] || [ ${#rows[@]} -gt 0 ] || { echo "N: Unable to locate package $pkg" >&2; return; }
+  if [ -n "$inst" ]; then
+    if [ -z "${prio[$inst]:-}" ] || [ "${prio[$inst]}" -lt 100 ]; then prio[$inst]=100; fi
+  fi
+  for v in "${!prio[@]}"; do
+    [ "${prio[$v]}" -ge 0 ] || continue
+    if [ -z "$best" ] || [ "${prio[$v]}" -gt "$bestp" ] \
+      || { [ "${prio[$v]}" = "$bestp" ] && "$P2S_REAL_DPKG" --compare-versions "$v" gt "$best"; }; then
+      best=$v bestp=${prio[$v]}
+    fi
+  done
+  if [ -n "$inst" ] && [ -n "$best" ] && [ "$bestp" -lt 1000 ] && "$P2S_REAL_DPKG" --compare-versions "$best" lt "$inst"; then
+    best=$inst
+  fi
+  echo "$pkg:"
+  echo "  Installed: ${inst:-(none)}"
+  echo "  Candidate: ${best:-(none)}"
+  echo "  Version table:"
+  for r in "${rows[@]}"; do
+    IFS='|' read -r v pr uri dist <<<"$r"
+    printf '     %s %s\n        %s %s %s amd64 Packages\n' "$v" "${prio[$v]}" "$pr" "$uri" "$dist"
+  done
+  [ -z "$inst" ] || printf '        100 /var/lib/dpkg/status\n'
+}
+# apt-config dump: the host's apt-config.txt, then the unattended-upgrades origin lists of every apt.conf.d file
+# apt reads (no extension or ".conf", same name rule as preferences.d).
+stub_aptconf_dump() {
+  local f n
+  [ -f "$P2S_STUB/apt-config.txt" ] && cat "$P2S_STUB/apt-config.txt"
+  for f in "$P2S_ROOT"/etc/apt/apt.conf.d/*; do
+    [ -f "$f" ] || continue
+    n=${f##*/}
+    [[ $n =~ ^[A-Za-z0-9_.-]+$ ]] && [[ $n != *.* || $n == *.conf ]] || continue
+    sed 's#//.*##' "$f" | tr '\n' ' ' \
+      | grep -oE 'Unattended-Upgrade::(Allowed-Origins|Origins-Pattern)[[:space:]]*\{[^}]*\}' \
+      | while read -r key rest; do
+        grep -oE '"[^"]*"' <<<"$rest" | while read -r v; do printf '%s:: %s;\n' "$key" "$v"; done
+      done
+  done
+}
+EOF
+# apt-cache madison <package>: the host's madison/<package>.txt. apt-cache policy <package>...: see stub_policy;
+# it drains stdin as apt-get does, so a call without </dev/null swallows the rest of the streamed program.
+stub apt-cache 'if [ "$1" = madison ]; then
+  [ -f "$P2S_STUB/madison/$2.txt" ] && cat "$P2S_STUB/madison/$2.txt"
+  exit 0
+fi
+[ "$1" = policy ] || exit 0
+cat >/dev/null
+shift
+. "$P2S_STUBLIB/apt.sh"
+for p; do stub_policy "$p"; done'
+# unattended-upgrade --dry-run: prints the origins it accepts, as unattended-upgrades does, from the merged apt
+# config with ${distro_codename} filled in; fail-uu in the host fixture makes it fail.
+stub unattended-upgrade 'cat >/dev/null
+[ -e "$P2S_STUB/fail-uu" ] && { echo "E: unattended-upgrade: apt_pkg.Error: E:Unable to parse package file"; exit 1; }
+. "$P2S_STUBLIB/apt.sh"
+code=$(sed -nE "s/^VERSION_CODENAME=\"?([^\"]*)\"?$/\1/p" "$P2S_ROOT/etc/os-release")
+allowed=$(stub_aptconf_dump | sed -nE "s/^Unattended-Upgrade::Allowed-Origins:: \"([^:\"]*):([^\"]*)\";$/o=\1,a=\2/p; s/^Unattended-Upgrade::Origins-Pattern:: \"([^\"]*)\";$/\1/p" \
+  | sed "s/\${distro_id}/Ubuntu/g; s/\${distro_codename}/$code/g" | paste -sd, - | sed "s/,o=/, o=/g; s/,origin=/, origin=/g")
+echo "Starting unattended upgrades script"
+echo "Allowed origins are: $allowed"
+echo "No packages found that can be upgraded unattended and no pending auto-removals"'
 # "apt-get download pkg=ver" leaves a .deb naming its fixture; a version without a fixture is not found.
 # apt-get and dpkg-deb drain stdin, as a prompting tool would: the audit itself arrives on stdin, so a call
 # without </dev/null swallows the rest of the program (or the remaining branches) and records go missing.
@@ -216,8 +369,9 @@ stub dpkg-deb 'cat >/dev/null
 stub apt 'exit 0'
 stub apt-mark '[ "$1" = showhold ] && [ -f "$P2S_STUB/holds.txt" ] && cat "$P2S_STUB/holds.txt"
 exit 0'
-stub apt-config '[ "$1" = dump ] && [ -f "$P2S_STUB/apt-config.txt" ] && cat "$P2S_STUB/apt-config.txt"
-exit 0'
+stub apt-config '[ "$1" = dump ] || exit 0
+. "$P2S_STUBLIB/apt.sh"
+stub_aptconf_dump'
 # nginx -T as nginx prints it: every loaded file behind a "# configuration file" header, sites-enabled
 # entries read through their symlinks. A host without /etc/nginx has no nginx (127).
 stub nginx '[ -d "$P2S_ROOT/etc/nginx" ] || { echo "nginx: command not found" >&2; exit 127; }
@@ -856,6 +1010,65 @@ has "$PR" "- HTTP probe: every status code unchanged" "report: probe unchanged"
 has "$PR" '- **Preflight stopped the patch: held**, held: `php8.3-fpm`' "report: preflight stop"
 has "$PR" '- `shop.example.com`: 200 -> 502 - **changed**' "report: changed site"
 hasnt "$PR" "No PHP-FPM or PHP-CGI installed." "report: a fix log is not an empty host"
+
+echo "▸ autoupdate"
+# A host's whole tree, directories included: the keeper must not even create one where it has nothing to do.
+tree() { (cd "$WORK/hosts/$1" && find . -type d | sort && find . -type f -exec md5sum {} + | sort); }
+yreset() { rm -rf "$WORK/hosts/web-y"; cp -r "$WORK/web-y.pristine" "$WORK/hosts/web-y"; }
+y() { echo "$WORK/hosts/web-y/root$1"; }
+PIN83=/etc/apt/preferences.d/php2shell-php8.3.pref
+UUC=/etc/apt/apt.conf.d/51php2shell-ppa-origins
+SU835=8.3.35-1+ubuntu24.04.1+deb.sury.org+1
+U83=8.3.6-0ubuntu0.24.04.13
+before_line() { # before_line <text> <pattern a> <pattern b>: a's first line comes before b's
+  local a b
+  a=$(grep -nF -- "$2" <<<"$1" | head -1 | cut -d: -f1) b=$(grep -nF -- "$3" <<<"$1" | head -1 | cut -d: -f1)
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]
+}
+
+TB=$(tree web-b)
+: >"$STUB_LOG"
+AB=$(bash "$S/run.sh" autoupdate web-b); code=$?
+eq "$code" 0 "web-b (PPA builds, no PPA source): exit 0"
+has "$AB" "kind=keeper host=web-b state=no-ppa" "web-b: no PPA, nothing to keep"
+eq "$(tree web-b)" "$TB" "web-b: no file written, no directory made"
+eq "$(grep -cE '^(apt-cache policy|unattended-upgrade) ' "$STUB_LOG")" 0 "web-b: apt not even asked"
+
+yreset
+: >"$STUB_LOG"
+AY=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 0 "web-y: Ubuntu 8.3 pinned, PPA origin added -> exit 0"
+PIN=$(cat "$(y $PIN83)" 2>/dev/null)
+has "$PIN" "Package: php8.3 php8.3-* libapache2-mod-php8.3" "web-y: the pin covers every package of the 8.3 branch"
+has "$PIN" "Pin: origin ppa.launchpadcontent.net" "web-y: the pin names the PPA's site"
+has "$PIN" "Pin-Priority: -1" "web-y: the pin keeps PPA builds off the branch (-1)"
+eq "$(ls "$(y /etc/apt/preferences.d)")" "php2shell-php8.3.pref" "web-y: one pin, none for the PPA-built 8.4"
+has "$(cat "$(y $UUC)" 2>/dev/null)" 'Unattended-Upgrade::Allowed-Origins { "LP-PPA-ondrej-php:noble"; };' \
+  "web-y: unattended-upgrades accepts the PPA origin (Origin and Suite from its Release file)"
+has "$AY" "kind=pin host=web-y branch=8.3 file=$PIN83 action=written" "web-y: pin record"
+has "$AY" "kind=uu_entry host=web-y value=LP-PPA-ondrej-php:noble file=$UUC action=written" "web-y: origin entry record"
+before_line "$AY" "kind=pin host=web-y branch=8.3" "kind=uu_entry host=web-y" && ok "web-y: the pin is written before the origin entry" \
+  || bad "web-y: the pin is written before the origin entry" "$AY"
+has "$AY" "kind=policy host=web-y branch=8.3 origin=distro package=php8.3-fpm installed=$U83 before=$SU835 candidate=$U83 candidate_origin=distro moved=- pin=$PIN83 state=kept" \
+  "web-y: 8.3 candidate is the PPA's 8.3.35 before the pin and Ubuntu's after it"
+has "$AY" "kind=policy host=web-y branch=8.4 origin=ppa package=php8.4-fpm installed=8.4.17-1+ubuntu24.04.1+deb.sury.org+1 before=8.4.27-1+ubuntu24.04.1+deb.sury.org+1 candidate=8.4.27-1+ubuntu24.04.1+deb.sury.org+1 candidate_origin=ppa moved=- pin=- state=kept" \
+  "web-y: 8.4 candidate stays the PPA's newer build"
+has "$(grep '^unattended-upgrade ' "$STUB_LOG")" "unattended-upgrade --dry-run" "web-y: unattended-upgrades dry run"
+has "$AY" "kind=uu_dryrun host=web-y result=ok exit=0 origins_allowed=LP-PPA-ondrej-php" "web-y: the dry run accepts the PPA origin"
+has "$AY" "kind=keeper host=web-y state=configured" "web-y: configured"
+has "$AY" "rm $PIN83" "web-y: rollback line for the pin"
+has "$AY" "rm $UUC" "web-y: rollback line for the origin entry"
+has "$(bash "$S/run.sh" audit web-y)" "kind=autoupdate host=web-y periodic=1 origins=4 ppa_covered=yes" "web-y: the audit now sees the PPA covered"
+
+TY=$(tree web-y)
+: >"$STUB_LOG"
+AY2=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 0 "web-y second run: exit 0"
+eq "$(tree web-y)" "$TY" "web-y second run: nothing written"
+has "$AY2" "kind=pin host=web-y branch=8.3 file=$PIN83 action=present" "web-y second run: its own pin recognised"
+has "$AY2" "kind=uu_entry host=web-y value=LP-PPA-ondrej-php:noble file=- action=present" "web-y second run: origin entry recognised"
+has "$AY2" "kind=keeper host=web-y state=unchanged" "web-y second run: unchanged"
+hasnt "$AY2" "rm $PIN83" "web-y second run: no rollback line for files it did not write"
 
 echo "▸ runner"
 has "$(bash "$S/run.sh" bundle audit | head -3)" "Fixed-build thresholds" "bundle starts with the version data"

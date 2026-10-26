@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Local runner. Streams a mode's scripts to each host as one bash program over ssh, so nothing is copied
 # to a server, and saves each host's output to its own log that report.sh and next.sh read.
-# Usage: run.sh audit|ensure|fix <host>... host: an ssh alias or user@address; audit only reads, the others write
-#        run.sh bundle <mode>             print the stream for <mode> (what ssh would receive)
+# Usage: run.sh audit|ensure|fix|autoupdate <host>... host: an ssh alias or user@address; audit only reads,
+#        the others write
+#        run.sh bundle <mode>                        print the stream for <mode> (what ssh would receive)
 # Logs:  ${P2S_CACHE:-$XDG_CACHE_HOME/php2shell}/<host>-<mode>-<UTC stamp with ms>.log, opened by a "run"
 #        record and closed by a "run_end" record (exit code; status ok, exit-<n>, unreachable or timeout).
 # SSH:   BatchMode, so keys and agent come from the operator's ssh config and nothing prompts; connect timeout
@@ -19,7 +20,7 @@ CONNECT_TIMEOUT=${P2S_CONNECT_TIMEOUT:-10}
 HOST_TIMEOUT=${P2S_HOST_TIMEOUT:-600}
 
 usage() {
-  sed -n '4,5s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
+  sed -n '4,6s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2
   exit 2
 }
 
@@ -28,6 +29,7 @@ bundle() {
     audit) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/mitigation.sh" "$HERE/lib/hostfacts.sh" "$HERE/lib/branch.sh" "$HERE/audit.sh" ;;
     ensure) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/mitigation.sh" "$HERE/ensure.sh" ;;
     fix) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/mitigation.sh" "$HERE/lib/hostfacts.sh" "$HERE/lib/branch.sh" "$HERE/fix.sh" ;;
+    autoupdate) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/hostfacts.sh" "$HERE/lib/pins.sh" "$HERE/autoupdate.sh" ;;
     *) echo "unknown mode: $1" >&2; return 2 ;;
   esac
 }
@@ -65,7 +67,7 @@ case ${1:-} in
     [ $# -eq 2 ] || usage
     bundle "$2"
     ;;
-  audit | ensure | fix)
+  audit | ensure | fix | autoupdate)
     [ $# -ge 2 ] || usage
     mode=$1
     shift
