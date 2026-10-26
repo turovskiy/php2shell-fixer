@@ -18,8 +18,12 @@
 # Runs as the tail of the bundle from run.sh (after versions.sh, p2s.sh, hostfacts.sh, pins.sh):
 # run.sh autoupdate <host>
 # Exit: 0 configured, already in place, or no PPA on the host; 1 not root, a PPA source without a cached
-#       Release file or with changed Release info, a candidate that would change origin (refused), or a dry
-#       run that does not accept the PPA origin (its entry removed again).
+#       Release file (no-cached-release) or with changed Release info (release-info-changed), a pin or the
+#       origin entry that could not be written (pin-write-failed, origin-write-failed) or an old file not
+#       backed up (backup-failed), a candidate that would change origin or a pin that holds nothing
+#       (refused), a dry run that does not accept the PPA origin or takes a distro branch from it
+#       (dryrun-failed, its entry removed again), or a signal before the dry run's verdict (interrupted,
+#       its entry put back).
 set -u
 export LC_ALL=C
 
