@@ -338,7 +338,9 @@ shift
 . "$P2S_STUBLIB/apt.sh"
 for p; do stub_policy "$p"; done'
 # unattended-upgrade --dry-run: prints the origins it accepts, as unattended-upgrades does, from the merged apt
-# config with ${distro_codename} filled in; fail-uu in the host fixture makes it fail.
+# config with ${distro_id} and ${distro_codename} filled in, then the packages it would upgrade: those of
+# uu-upgrades.txt ("<Release Origin> <package>", what this unattended-upgrades would take from which origin)
+# whose origin it accepts, on one "Packages that will be upgraded:" line. fail-uu makes it fail.
 stub unattended-upgrade 'cat >/dev/null
 [ -e "$P2S_STUB/fail-uu" ] && { echo "E: unattended-upgrade: apt_pkg.Error: E:Unable to parse package file"; exit 1; }
 . "$P2S_STUBLIB/apt.sh"
@@ -347,7 +349,12 @@ allowed=$(stub_aptconf_dump | sed -nE "s/^Unattended-Upgrade::Allowed-Origins:: 
   | sed "s/\${distro_id}/Ubuntu/g; s/\${distro_codename}/$code/g" | paste -sd, - | sed "s/,o=/, o=/g; s/,origin=/, origin=/g")
 echo "Starting unattended upgrades script"
 echo "Allowed origins are: $allowed"
-echo "No packages found that can be upgraded unattended and no pending auto-removals"'
+up=()
+while read -r o p; do
+  case ", $allowed," in *", o=$o,"* | *", origin=$o,"*) up+=("$p") ;; esac
+done 2>/dev/null <"$P2S_STUB/uu-upgrades.txt"
+if [ ${#up[@]} -gt 0 ]; then echo "Packages that will be upgraded: ${up[*]}"
+else echo "No packages found that can be upgraded unattended and no pending auto-removals"; fi'
 # "apt-get download pkg=ver" leaves a .deb naming its fixture; a version without a fixture is not found.
 # apt-get and dpkg-deb drain stdin, as a prompting tool would: the audit itself arrives on stdin, so a call
 # without </dev/null swallows the rest of the program (or the remaining branches) and records go missing.
@@ -1103,7 +1110,7 @@ has "$AY" "kind=policy host=web-y branch=8.3 origin=distro package=php8.3-fpm in
 has "$AY" "kind=policy host=web-y branch=8.4 origin=ppa package=php8.4-fpm installed=8.4.17-1+ubuntu24.04.1+deb.sury.org+1 before=8.4.27-1+ubuntu24.04.1+deb.sury.org+1 candidate=8.4.27-1+ubuntu24.04.1+deb.sury.org+1 candidate_origin=ppa moved=- pin=- state=kept" \
   "web-y: 8.4 candidate stays the PPA's newer build"
 has "$(grep '^unattended-upgrade ' "$STUB_LOG")" "unattended-upgrade --dry-run" "web-y: unattended-upgrades dry run"
-has "$AY" "kind=uu_dryrun host=web-y result=ok exit=0 origins_allowed=LP-PPA-ondrej-php" "web-y: the dry run accepts the PPA origin"
+has "$AY" "kind=uu_dryrun host=web-y result=ok exit=0 origins_allowed=LP-PPA-ondrej-php from_ppa=-" "web-y: the dry run accepts the PPA origin"
 has "$AY" "kind=keeper host=web-y state=configured" "web-y: configured"
 has "$AY" "rm $PIN83" "web-y: rollback line for the pin"
 has "$AY" "rm $UUC" "web-y: rollback line for the origin entry"
@@ -1265,6 +1272,28 @@ has "$AL" "kind=keeper host=web-y state=stopped reason=release-info-changed fiel
 eq "$(tree web-y)" "$TL" "web-y with a changed Release Label: nothing written"
 eq "$(grep -cE '^apt-get ' "$STUB_LOG")" 0 "web-y with a changed Release Label: the keeper never runs the accept command itself"
 eq "$(find "$TMPDIR" -mindepth 1 | head -3)" "" "web-y with a changed Release Label: no InRelease download left behind"
+
+# With the PPA origin accepted, this unattended-upgrades would take php8.3-fpm (Ubuntu-built) from the PPA: the
+# dry run lists it among the upgrades only once the PPA is allowed, so the entry is taken out again. Ubuntu's
+# own update of php8.3-common is listed before and after and is no reason to stop.
+yreset
+printf '%s\n' 'Ubuntu php8.3-common' 'LP-PPA-ondrej-php php8.3-fpm' 'LP-PPA-ondrej-php php8.4-fpm' >"$WORK/hosts/web-y/uu-upgrades.txt"
+AW=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 1 "web-y dry run takes a distro branch from the PPA: exit 1"
+has "$AW" "kind=uu_dryrun host=web-y result=distro-from-ppa exit=0 origins_allowed=LP-PPA-ondrej-php from_ppa=php8.3-fpm" \
+  "web-y dry run takes a distro branch from the PPA: names the package, not Ubuntu's own update or the PPA branch"
+[ -e "$(y $UUC)" ] && bad "web-y dry run takes a distro branch from the PPA: origin entry removed again" \
+  || ok "web-y dry run takes a distro branch from the PPA: origin entry removed again"
+has "$AW" "kind=uu_entry host=web-y value=LP-PPA-ondrej-php:noble file=$UUC action=removed" "web-y dry run takes a distro branch from the PPA: removal recorded"
+has "$AW" "kind=keeper host=web-y state=dryrun-failed" "web-y dry run takes a distro branch from the PPA: keeper record"
+has "$(bash "$S/report.sh" "$(sed -n 's/^log: //p' <<<"$AW")")" '**would upgrade php8.3-fpm of a distro-built branch from the PPA**' \
+  "report: the dry run's PPA upgrade of a distro branch"
+yreset
+printf '%s\n' 'Ubuntu php8.3-common' 'LP-PPA-ondrej-php php8.4-fpm' >"$WORK/hosts/web-y/uu-upgrades.txt"
+AV=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 0 "web-y dry run upgrades Ubuntu's 8.3 from Ubuntu and the PPA's 8.4 from the PPA: exit 0"
+has "$AV" "kind=uu_dryrun host=web-y result=ok exit=0 origins_allowed=LP-PPA-ondrej-php from_ppa=-" \
+  "web-y dry run with only expected upgrades: ok"
 
 # No cached Release file: the Origin to accept is unknown, so nothing is written.
 yreset

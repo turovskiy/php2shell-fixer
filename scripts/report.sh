@@ -262,6 +262,7 @@ while IFS=$'\t' read -r _ _ _ log; do
         case ${r[result]} in
           ok) u="ok, accepts ${r[origins_allowed]}" ;;
           origin-missing) u="**the PPA origin is not among the accepted ones**" ;;
+          distro-from-ppa) u="**would upgrade ${r[from_ppa]//,/, } of a distro-built branch from the PPA**" ;;
           *) u="**failed** (exit ${r[exit]})" ;;
         esac
         klines+=("- unattended-upgrade --dry-run: $u")

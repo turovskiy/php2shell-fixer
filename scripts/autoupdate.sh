@@ -11,7 +11,8 @@
 #    installed build today. When either fails, the run stops and names the branch: the pins stay (they
 #    only hold a branch where it is), the origin entry is not written;
 # 3. the PPA origin goes into the origins unattended-upgrades accepts (/etc/apt/apt.conf.d/51php2shell-ppa-origins),
-#    and unattended-upgrade --dry-run must list it; when it does not, that entry is taken out again.
+#    and unattended-upgrade --dry-run must list it and must not upgrade a package of a distro-built branch it
+#    did not upgrade before the entry (that one would come from the PPA); otherwise the entry is taken out.
 # A pin or origin entry already in place is recognised by content, whatever its file name, and not written
 # twice. A pin apt does not apply (a preferences.d name with another extension than .pref) shows in step 2.
 # Runs as the tail of the bundle from run.sh (after versions.sh, p2s.sh, hostfacts.sh, branch.sh, pins.sh):
@@ -218,8 +219,13 @@ for e in "${entries[@]}"; do
   fi
 done
 uc=$(p2s_path "$P2S_UU_CONF")
-uprev="" uwrote=no
+uprev="" uwrote=no pre_up=""
+# The packages a dry run would upgrade, one per line, from its "Packages that will be upgraded:" line.
+au_upgrades() { sed -nE 's/^Packages that will be upgraded: //p' <<<"$1" | tail -1 | tr ' ' '\n' | grep .; }
 if [ ${#need[@]} -gt 0 ]; then
+  # What unattended-upgrades would upgrade before the PPA is accepted: a package it upgrades only afterwards
+  # comes from the PPA.
+  pre_up=$(au_upgrades "$(unattended-upgrade --dry-run -v </dev/null 2>&1)")
   keep=()
   if [ -e "$uc" ]; then
     uprev=$(cat "$uc")
@@ -255,9 +261,19 @@ if [ ${#need[@]} -gt 0 ]; then
   fi
 fi
 
-# unattended-upgrades prints the origins it accepts; each PPA origin has to be among them.
+# unattended-upgrades prints the origins it accepts; each PPA origin has to be among them. And it prints the
+# packages it would upgrade: one of a distro-built branch that it takes only now the PPA is accepted would
+# move that branch to the PPA, whatever the pins say.
 dry=$(unattended-upgrade --dry-run -v </dev/null 2>&1)
 drc=$?
+from_ppa=()
+if [ "$uwrote" = yes ]; then
+  while read -r p; do
+    ! grep -qxF "$p" <<<"$pre_up" || continue
+    b=$(awk -F'|' -v p="$p" '$2 == p {print $1; exit}' <<<"$all")
+    [ -n "$b" ] && [ "${b_origin[$b]}" = distro ] && from_ppa+=("$p")
+  done < <(au_upgrades "$dry")
+fi
 allowed=$(sed -nE 's/^Allowed origins are: //p' <<<"$dry" | tail -1 | tr ' ' ',')
 seen=() result=ok
 for e in "${entries[@]}"; do
@@ -268,21 +284,25 @@ for e in "${entries[@]}"; do
     result=origin-missing
   fi
 done
+[ "$result" != ok ] || [ ${#from_ppa[@]} -eq 0 ] || result=distro-from-ppa
 [ "$drc" = 0 ] || result=failed
 p2s_record kind=uu_dryrun host="$host" result="$result" exit="$drc" \
-  origins_allowed="$(if [ ${#seen[@]} -gt 0 ]; then IFS=,; echo "${seen[*]}"; else echo -; fi)"
+  origins_allowed="$(if [ ${#seen[@]} -gt 0 ]; then IFS=,; echo "${seen[*]}"; else echo -; fi)" \
+  from_ppa="$(if [ ${#from_ppa[@]} -gt 0 ]; then IFS=,; echo "${from_ppa[*]}"; else echo -; fi)"
 echo "unattended-upgrade --dry-run: $result (exit $drc)"
 if [ "$result" != ok ]; then
   tail -5 <<<"$dry" | sed 's/^/  | /'
+  why="the dry run does not accept the PPA origin"
+  [ "$result" != distro-from-ppa ] || why="with the PPA origin accepted, unattended-upgrades would upgrade ${from_ppa[*]} of a distro-built branch from the PPA"
   if [ "$uwrote" = yes ]; then
     if [ -n "$uprev" ]; then printf '%s\n' "$uprev" >"$uc"; else rm -f "$uc"; fi
     unset 'P2S_ROLLBACK[-1]'
     for e in "${need[@]}"; do
       p2s_record kind=uu_entry host="$host" value="$(p2s_enc "$e")" file="$P2S_UU_CONF" action=removed
     done
-    echo "STOP: the dry run does not accept the PPA origin; $P2S_UU_CONF is back as it was"
+    echo "STOP: $why; $P2S_UU_CONF is back as it was"
   else
-    echo "STOP: the dry run does not accept the PPA origin"
+    echo "STOP: $why"
   fi
   au_end 1 state=dryrun-failed
 fi
