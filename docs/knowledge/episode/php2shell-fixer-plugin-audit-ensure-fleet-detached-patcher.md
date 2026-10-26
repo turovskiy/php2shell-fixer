@@ -24,6 +24,8 @@ files_touched:
   - docs/agents/issue-tracker.md
   - docs/agents/triage-labels.md
   - docs/knowledge/README.md
+  - docs/knowledge/episode/php2shell-fixer-plugin-audit-ensure-fleet-detached-patcher.md
+  - docs/knowledge/project/php2shell-fixer.md
   - scripts/audit.sh
   - scripts/ensure.sh
   - scripts/fix.sh
@@ -175,14 +177,14 @@ files_touched:
   - tests/fixtures/logs/verify-audit-20261026T090000.000Z.log
   - tests/fixtures/logs/verify-ensure-20261026T100000.000Z.log
   - tests/run.sh
-ended_at: "2026-10-26T11:31:28Z"
+ended_at: "2026-10-26T15:17:02Z"
 status: active
 git:
   repo_root: /home/alexturik/ALEXTURIK_DEV/CC_PLUGINS_BY_ALEXTURIK/php2shell-fixer
-  branch: 8-apt-hook
+  branch: wrap-changelog-8-merged
   parent_branch: main
   base_sha: 9bba062b253707c6b7b9742e54f18bd94eb41340
-  head_sha: c4713dfd4485ce02baa56026bf03c20fe57d11d9
+  head_sha: ad46369af101c39212c1568a3eed715d8ff10f73
   commits_sha:
     - 7c594f57c812fbd15d7ce5add5ce1d2b405ff141
     - 5ab7b3888578013fd25f7ff507847d29989c4147
@@ -201,20 +203,23 @@ git:
     - 0f7d27a0539efb6cc948438d528b5de35442ffa3
     - 07f08bda9b73b921ae1baf9e6c16f17a5896d19e
     - c4713dfd4485ce02baa56026bf03c20fe57d11d9
+    - c7f9d3d1da8975e98641d5f32736aeaf7b8d628d
+    - 5ce84ad9b0601315bc37f06335c87ec861bfb33a
+    - ad46369af101c39212c1568a3eed715d8ff10f73
   remote_url: https://github.com/turovskiy/php2shell-fixer.git
   base_sha_orphan: false
 id: episode/php2shell-fixer-plugin-audit-ensure-fleet-detached-patcher
 created: "2026-10-26T11:31:28Z"
-updated: "2026-10-26T11:31:28Z"
+updated: "2026-10-26T15:17:03Z"
 confidence: 0.58
 review: unreviewed
 tier: supporting
-summary: 'Goal: build the php2shell-fixer Claude Code plugin from an empty repo: agent-skills setup, PRD and tickets on GitHub, then implement tickets #2-#8 (audit, candidate target, ensure mitigation, host fac'
+summary: 'Goal: build the php2shell-fixer Claude Code plugin from an empty repo: agent-skills setup, PRD and tickets on GitHub, implement tickets #2-#8 (audit, candidate target, ensure mitigation, host facts, f'
 ---
 
 # php2shell-fixer plugin: audit, ensure, fleet, detached patcher, apt hook
 
-Goal: build the php2shell-fixer Claude Code plugin from an empty repo: agent-skills setup, PRD and tickets on GitHub, then implement tickets #2-#8 (audit, candidate target, ensure mitigation, host facts, fleet/resume, detached patcher, apt hook) with tests, PRs and merges. | What happened: setup wrote CLAUDE.md + docs/agents and created triage labels. PRD #1 drew on the earlier PHP2Shell incident scripts and three episodes; CVE-2026-115560 facts came from web search. Tickets #2-#10 were published with native sub-issue and blocked-by links. Each ticket went branch -> implementation -> bash test runner with stub binaries and fake roots -> mutation checks on a throwaway copy -> real read-only audit on one server -> PR with the pr skill -> merge with --match-head-commit (needs the full SHA). PRs #11-#16 merged; #8 is committed on its branch, not pushed. A real server was found still vulnerable (PPA PHP 8.2.30, not covered by unattended-upgrades) and patched by the owner. Side agents raised five valid points that changed the code: restart-after-upgrade, stale apt lists making "no fix" wrong, the SSH drop killing apt (led to systemd-run detachment in #7), PECL extensions with their own versions (filter by ${source:Package}), and mod_php hosts reported as done. | Outcome: partial - #2-#7 merged with tests and mutation checks (285 tests on main), #8 ready on its branch (304 tests), #9 and #10 open, mod_php guard awaiting the owner's decision. | Lessons: (1) Mutation checks found three tests that passed for the wrong reason: a drop simulation that killed only the shell and not its process group, an auto-accept that was masked by a later stop, and a pool "unused" rule with no fixture to exercise it. Run mutations for every safety rule before trusting green tests. (2) A stub must model the real failure mode: sshd sends SIGHUP to the whole session, so kill the process group in the stub. (3) A bash block whose redirection fails is skipped entirely: a hook with an unopenable log silently did nothing. (4) The program streamed through `ssh host 'bash -s'` arrives on stdin, so every command inside needs </dev/null, otherwise apt-get or a prompt eats the rest of the script; test it with stubs that drain stdin. (5) Shared cache dirs collect foreign files: a reader with a "--latest" mode must filter by its own naming scheme. (6) Generated scripts that rely on env vars for tests must export them; unexported vars do not reach child processes. (7) Public repo: keep fixtures and episodes free of client hosts and domains, and ignore session memos.
+Goal: build the php2shell-fixer Claude Code plugin from an empty repo: agent-skills setup, PRD and tickets on GitHub, implement tickets #2-#8 (audit, candidate target, ensure mitigation, host facts, fleet/resume, detached patcher, apt hook) with tests, PRs and merges, then write a public guide on patching PHP for the agency site. | What happened: setup wrote CLAUDE.md + docs/agents and created triage labels. PRD #1 drew on the earlier PHP2Shell incident scripts and three episodes; CVE-2026-115560 facts came from web search. Tickets #2-#10 were published with native sub-issue and blocked-by links. Each ticket went branch -> implementation -> bash test runner with stub binaries and fake roots -> mutation checks on a throwaway copy -> real read-only audit on one server -> PR with the pr skill -> merge with --match-head-commit (needs the full SHA). PRs #11-#17 merged (#2-#8), 304 tests on main. A real server was found still vulnerable (PPA PHP 8.2.30, not covered by unattended-upgrades), patched by the owner, then verified with the plugin's audit and fix. Side agents raised valid points that changed the code: restart-after-upgrade, stale apt lists making "no fix" wrong, an SSH drop killing apt (led to systemd-run detachment), PECL extensions with their own versions (filter by ${source:Package}), mod_php hosts reported as done, and a guide file that would publish on the next deploy because the site's guides have no draft flag. The guide (English for the site, Ukrainian version, LinkedIn post) stays as an untracked draft in docs/posts; facts were re-checked against dpkg, the client memo and apt_preferences(5) before writing, and four inaccuracies were removed on reread. The root key loaded into an ssh agent for the real-host checks was removed by the owner at the end. | Outcome: partial - #2-#8 merged and tested, #9 and #10 open, mod_php guard awaiting a decision, guide awaiting review; a small branch with the changelog fix and this episode is local and unpushed. | Lessons: (1) Mutation checks found tests that passed for the wrong reason: a drop simulation that killed only the shell and not its process group, an auto-accept masked by a later stop, and a pool "unused" rule with no fixture to exercise it. Run mutations for every safety rule before trusting green tests. (2) A stub must model the real failure mode: sshd sends SIGHUP to the whole session, so kill the process group in the stub. (3) A bash block whose redirection fails is skipped entirely: a hook with an unopenable log silently did nothing. (4) A program streamed through `ssh host 'bash -s'` arrives on stdin, so every command inside needs </dev/null, or apt-get eats the rest of the script; test with stubs that drain stdin. (5) Shared cache dirs collect foreign files: a "--latest" reader must filter by its own naming scheme. (6) Generated scripts that rely on env vars must export them. (7) Public repo and public guides: keep fixtures, episodes and posts free of client hosts and domains, ignore session memos, and keep drafts out of folders that publish on deploy. (8) An SSH key added to an agent for a task stays usable by every local process until removed; add it with a lifetime (ssh-add -t).
 
 ## Related
 
