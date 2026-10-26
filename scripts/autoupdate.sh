@@ -3,8 +3,9 @@
 # nothing. The order is the safety:
 # 1. every distro-built branch the PPA also ships is pinned off the PPA (Pin-Priority -1,
 #    /etc/apt/preferences.d/php2shell-php<X.Y>.pref);
-# 2. each installed PHP package's apt-cache policy candidate must keep the origin of its installed build. When
-#    one would move, the run stops and names the branch: the pins stay (they only hold a branch where it is),
+# 2. each installed PHP package's apt-cache policy candidate must keep the origin of its installed build, an
+#    origin being the source apt-cache policy lists under the build (PPA site or distro mirror). When one
+#    would move, the run stops and names the branch: the pins stay (they only hold a branch where it is),
 #    the origin entry is not written;
 # 3. the PPA origin goes into the origins unattended-upgrades accepts (/etc/apt/apt.conf.d/51php2shell-ppa-origins),
 #    and unattended-upgrade --dry-run must list it; when it does not, that entry is taken out again.
@@ -60,11 +61,13 @@ if [ -n "$missing" ]; then
   au_end 1 state=stopped reason=no-cached-release
 fi
 
-# Every PHP branch, the package that stands for it (its FPM, its mod_php, its common package), what apt would
-# install before anything changes, and whether the PPA offers any of its packages.
+# Every PHP branch, the package that stands for it (its FPM, its mod_php, its common package), the origin of
+# its installed build and what apt would install before anything changes, both by the source apt-cache policy
+# lists (a version string alone does not tell a plain Debian revision from a sury build), and whether the PPA
+# offers any of its packages.
 all=$(p2s_php_packages)
 branches=$(awk -F'|' 'NF && !seen[$1]++ {print $1}' <<<"$all")
-declare -A b_pkg b_inst b_origin b_before b_ppa b_pin
+declare -A b_pkg b_inst b_origin b_before b_borigin b_ppa b_pin
 for b in $branches; do
   pkgs=$(awk -F'|' -v b="$b" '$1 == b {print $2}' <<<"$all")
   pkg=""
@@ -74,11 +77,10 @@ for b in $branches; do
   [ -n "$pkg" ] || pkg=$(head -1 <<<"$pkgs")
   b_pkg[$b]=$pkg
   b_inst[$b]=$(awk -F'|' -v p="$pkg" '$2 == p {print $3}' <<<"$all")
-  b_origin[$b]=$(p2s_origin "${b_inst[$b]}")
   b_ppa[$b]=no b_pin[$b]=-
   for p in $pkgs; do
-    read -r _ cand ppa <<<"$(p2s_policy_state "$p")"
-    [ "$p" = "$pkg" ] && b_before[$b]=$cand
+    read -r _ cand ppa io co <<<"$(p2s_policy_state "$p")"
+    [ "$p" = "$pkg" ] && b_origin[$b]=$io b_before[$b]=$cand b_borigin[$b]=$co
     [ "$ppa" = yes ] && b_ppa[$b]=yes
   done
 done
@@ -132,13 +134,12 @@ done
 echo "== 2. candidates: every package keeps the origin of its installed build"
 refused=()
 for b in $branches; do
-  moved=() cand=""
+  moved=() cand="" corigin=other
   for p in $(awk -F'|' -v b="$b" '$1 == b {print $2}' <<<"$all"); do
-    read -r inst c _ <<<"$(p2s_policy_state "$p")"
-    [ "$p" = "${b_pkg[$b]}" ] && cand=$c
-    [ "$c" != "(none)" ] && [ "$inst" != "(none)" ] && [ "$(p2s_origin "$c")" != "$(p2s_origin "$inst")" ] && moved+=("$p")
+    read -r inst c _ io co <<<"$(p2s_policy_state "$p")"
+    [ "$p" = "${b_pkg[$b]}" ] && cand=$c corigin=$co
+    [ "$c" != "(none)" ] && [ "$inst" != "(none)" ] && [ "$co" != "$io" ] && moved+=("$p")
   done
-  corigin=$(p2s_origin "$cand")
   state=kept
   if [ ${#moved[@]} -gt 0 ]; then
     refused+=("$b")
@@ -147,7 +148,7 @@ for b in $branches; do
   p2s_record kind=policy host="$host" branch="$b" origin="${b_origin[$b]}" package="${b_pkg[$b]}" installed="${b_inst[$b]}" \
     before="${b_before[$b]:-(none)}" candidate="$cand" candidate_origin="$corigin" \
     moved="$(if [ ${#moved[@]} -gt 0 ]; then IFS=,; echo "${moved[*]}"; else echo -; fi)" pin="${b_pin[$b]}" state="$state" \
-    before_origin="$(p2s_origin "${b_before[$b]:-(none)}")"
+    before_origin="${b_borigin[$b]:-other}"
   echo "php$b (${b_origin[$b]}): ${b_pkg[$b]} candidate ${b_before[$b]:-(none)} before, $cand ($corigin) now: $state"
   [ "$state" = kept ] && continue
   echo "STOP: php$b: apt would move ${moved[*]} from the ${b_origin[$b]} build to $corigin ($cand)"

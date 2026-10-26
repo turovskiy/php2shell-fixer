@@ -27,10 +27,12 @@ p2s_record() {
   printf '\n'
 }
 
-# Where a build comes from: the ondrej/sury PPA, the distro (Ubuntu or Debian), or something else.
+# Where a build comes from, by its version string: the ondrej/sury PPA (sury's Debian builds carry +debian<N>),
+# the distro (Ubuntu or Debian), or something else. A Debian revision without ~debNN or +debNN (trixie's
+# 8.4.11-1) says nothing and stays other; apt-cache policy names the source when it matters (p2s_url_origin).
 p2s_origin() {
   case $1 in
-    *sury*) echo ppa ;;
+    *sury* | *+debian[0-9]*) echo ppa ;;
     *ubuntu* | *~deb* | *+deb[0-9]*) echo distro ;;
     *) echo other ;;
   esac
@@ -45,6 +47,14 @@ p2s_list_origin() {
     *_ubuntu_dists_* | *_debian_dists_* | *debian-security_dists_*) echo distro ;;
     *) echo other ;;
   esac
+}
+
+# Origin of an apt source as apt-cache policy lists it, by the name apt gives its list files (p2s_list_origin):
+# https://packages.sury.org/php trixie/main -> packages.sury.org_php_dists_trixie_ -> ppa
+p2s_url_origin() { # $1 uri, $2 suite/component
+  local u=${1#*://}
+  u=${u%/}
+  p2s_list_origin "${u//\//_}_dists_${2%%/*}_"
 }
 
 # Are apt lists dated $1 (UTC ISO time, or "unknown") too old to offer the fixed builds? Prints yes|no|unknown.

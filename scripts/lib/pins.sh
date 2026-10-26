@@ -38,15 +38,27 @@ p2s_php_packages() {
       $2 ~ /^libapache2-mod-php[0-9]+\.[0-9]+$/ { b = $2; sub(/^libapache2-mod-php/, "", b); print b "|" $2 "|" $3 }'
 }
 
-# A package's state in apt-cache policy now: "<installed> <candidate> <ppa>", ppa being yes when a PPA source
-# offers any build of it. "(none)" for no installed build or no candidate.
+# A package's state in apt-cache policy now: "<installed> <candidate> <ppa> <installed origin> <candidate
+# origin>", ppa being yes when a PPA source offers any build of it, "(none)" for no installed build or no
+# candidate. A build's origin is that of the first source listed under it (p2s_url_origin), from its version
+# string (p2s_origin) when no source there says ppa or distro, as for a build only in /var/lib/dpkg/status.
 p2s_policy_state() { # $1 package
-  local out inst cand ppa=no
+  local out inst cand ppa=no io="" co="" v pr uri dist o
   out=$(apt-cache policy "$1" </dev/null 2>/dev/null)
   inst=$(sed -nE 's/^  Installed: (.*)$/\1/p' <<<"$out" | head -1)
   cand=$(sed -nE 's/^  Candidate: (.*)$/\1/p' <<<"$out" | head -1)
-  grep -qE '^ +-?[0-9]+ https?://[^ ]*(ondrej|sury)' <<<"$out" && ppa=yes
-  echo "${inst:-(none)} ${cand:-(none)} $ppa"
+  inst=${inst:-(none)} cand=${cand:-(none)}
+  # Version lines (" *** <version> <priority>" for the installed one) each followed by their source lines.
+  while IFS='|' read -r v pr uri dist; do
+    [ -n "$uri" ] || continue
+    o=$(p2s_url_origin "$uri" "$dist")
+    [ "$o" = ppa ] && ppa=yes
+    [ "$o" != other ] || continue
+    [ "$v" = "$inst" ] && [ -z "$io" ] && io=$o
+    [ "$v" = "$cand" ] && [ -z "$co" ] && co=$o
+  done < <(awk '/^ \*\*\* [^ ]+ -?[0-9]+$|^     [^ ]+ -?[0-9]+$/ { v = $(NF - 1); pr = $NF; next }
+    v != "" && /^ +-?[0-9]+ [a-z+]+:\/\// { print v "|" pr "|" $2 "|" $3 }' <<<"$out")
+  echo "$inst $cand $ppa ${io:-$(p2s_origin "$inst")} ${co:-$(p2s_origin "$cand")}"
 }
 
 # The pin the keeper writes for a branch, one stanza per PPA site.

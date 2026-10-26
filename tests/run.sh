@@ -252,23 +252,37 @@ stub_priority() { # $1 package, $2 version, $3 uri, $4 suite
   done < <(stub_prefs_stanzas)
   echo 500
 }
-# apt-cache policy <package>: the builds from madison/<package>.txt with their priorities, the installed one from
-# dpkg-query.txt. The candidate is the build with the highest priority (never a negative one), the higher
-# version on a tie; a build older than the installed one does not replace it below priority 1000.
+# Priority of a source itself: the first "Package: *" stanza whose Pin matches it, else 500. A pin for named
+# packages changes a version's priority, never its source's.
+stub_file_priority() { # $1 uri, $2 suite
+  local pk pin pr
+  while IFS=$'\t' read -r pk pin pr; do
+    [ "$pk" = "*" ] && [[ $pin != version\ * ]] && stub_pin_matches "$pin" - "$1" "$2" && { echo "$pr"; return; }
+  done < <(stub_prefs_stanzas)
+  echo 500
+}
+# apt-cache policy <package>, laid out as apt >= 1.1 prints it: the builds from madison/<package>.txt, each on a
+# version line with its own priority (a package pin shows here), "***" marking the installed one, and under it
+# one line per source with that source's priority, plus /var/lib/dpkg/status under the installed build. The
+# installed build comes from dpkg-query.txt. The candidate is the build with the highest priority (never a
+# negative one), the higher version on a tie; a build older than the installed one does not replace it below
+# priority 1000.
 stub_policy() {
-  local pkg=$1 inst v src uri dist pr best="" bestp="" rows=() r
-  local -A prio
+  local pkg=$1 inst v src uri dist pr best="" bestp="" r order=()
+  local -A prio srcs
   inst=$(awk -F'|' -v p="$pkg" '$1 ~ /^ii/ && $2 == p {print $3}' "$P2S_STUB/dpkg-query.txt")
   while IFS='|' read -r _ v src; do
     v=${v// /}
     [ -n "$v" ] || continue
     read -r uri dist _ <<<"$src"
     pr=$(stub_priority "$pkg" "$v" "$uri" "${dist%%/*}")
-    rows+=("$v|$pr|$uri|$dist")
+    [ -n "${srcs[$v]+x}" ] || order+=("$v")
+    srcs[$v]+="$(stub_file_priority "$uri" "${dist%%/*}")|$uri|$dist"$'\n'
     if [ -z "${prio[$v]:-}" ] || [ "$pr" -gt "${prio[$v]}" ]; then prio[$v]=$pr; fi
   done 2>/dev/null <"$P2S_STUB/madison/$pkg.txt"
-  [ -n "$inst" ] || [ ${#rows[@]} -gt 0 ] || { echo "N: Unable to locate package $pkg" >&2; return; }
+  [ -n "$inst" ] || [ ${#order[@]} -gt 0 ] || { echo "N: Unable to locate package $pkg" >&2; return; }
   if [ -n "$inst" ]; then
+    [ -n "${srcs[$inst]+x}" ] || order+=("$inst")
     if [ -z "${prio[$inst]:-}" ] || [ "${prio[$inst]}" -lt 100 ]; then prio[$inst]=100; fi
   fi
   for v in "${!prio[@]}"; do
@@ -285,11 +299,13 @@ stub_policy() {
   echo "  Installed: ${inst:-(none)}"
   echo "  Candidate: ${best:-(none)}"
   echo "  Version table:"
-  for r in "${rows[@]}"; do
-    IFS='|' read -r v pr uri dist <<<"$r"
-    printf '     %s %s\n        %s %s %s amd64 Packages\n' "$v" "${prio[$v]}" "$pr" "$uri" "$dist"
+  for v in "${order[@]}"; do
+    if [ "$v" = "$inst" ]; then printf ' *** %s %s\n' "$v" "${prio[$v]}"; else printf '     %s %s\n' "$v" "${prio[$v]}"; fi
+    while IFS='|' read -r pr uri dist; do
+      [ -n "$uri" ] && printf '       %4s %s %s amd64 Packages\n' "$pr" "$uri" "$dist"
+    done <<<"${srcs[$v]:-}"
+    [ "$v" != "$inst" ] || printf '        100 /var/lib/dpkg/status\n'
   done
-  [ -z "$inst" ] || printf '        100 /var/lib/dpkg/status\n'
 }
 # apt-config dump: the host's apt-config.txt, then the unattended-upgrades origin lists of every apt.conf.d file
 # apt reads (no extension or ".conf", same name rule as preferences.d).
@@ -501,6 +517,15 @@ eq "$(vd 8.5 8.5.12-1+ubuntu24.04.1+deb.sury.org+1 no)" "fixed upstream-threshol
 eq "$(vd 8.0 1:8.0.30-9+ubuntu24.04.1+deb.sury.org+1 missing)" "unfixed no-cve-in-changelog" "missing changelog is not a fix"
 eq "$(p2s_origin 8.3.6-0ubuntu0.24.04.13) $(p2s_origin 1:7.4.33-31+ubuntu24.04.1+deb.sury.org+1) $(p2s_origin 8.2.29-1~deb12u1) $(p2s_origin 8.3.36-1)" \
   "distro ppa distro other" "origin: Ubuntu, sury, Debian, other"
+eq "$(p2s_origin 8.3.27-1+0~20251023.80+debian13~1.gbp1a2b3c) $(p2s_origin 8.4.11-1)" "ppa other" \
+  "origin: sury's Debian build (+debian13) is the PPA's; a plain Debian revision stays other"
+eq "$(p2s_url_origin https://ppa.launchpadcontent.net/ondrej/php/ubuntu noble/main) \
+$(p2s_url_origin https://packages.sury.org/php/ trixie/main) \
+$(p2s_url_origin http://security.ubuntu.com/ubuntu noble-security/universe) \
+$(p2s_url_origin http://deb.debian.org/debian trixie/main) \
+$(p2s_url_origin http://security.debian.org/debian-security trixie-security/main) \
+$(p2s_url_origin https://repo.example.com/php noble/main)" \
+  "ppa ppa distro distro distro other" "source origin: by URL and suite, as apt names the list files"
 p2s_changelog_has_cves "  - debian/patches/CVE-2026-109618_109619.patch" && ok "Ubuntu patch name counts as both CVEs" \
   || bad "Ubuntu patch name counts as both CVEs"
 p2s_changelog_has_cves "  - CVE-2026-109618 only" && bad "one CVE alone is not a fix" || ok "one CVE alone is not a fix"
@@ -1157,6 +1182,40 @@ eq "$code" 0 "web-y with the ondrej/nginx PPA too: exit 0"
 eq "$(grep -o 'Allowed-Origins.*' "$(y $UUC)" 2>/dev/null)" 'Allowed-Origins { "LP-PPA-ondrej-php:noble"; };' \
   "web-y with the ondrej/nginx PPA too: only the PHP PPA's origin accepted"
 hasnt "$AG" "ondrej/nginx" "web-y with the ondrej/nginx PPA too: the nginx PPA is not a PHP source"
+
+# web-y as a Debian trixie host with packages.sury.org: Debian's own 8.4.11-1 has no ~debNN suffix and sury's
+# Debian builds carry +debian13 and no "sury", so the version strings say nothing about origin. The keeper
+# reads it from the source apt-cache policy lists under the installed build and the candidate.
+SUD84=8.4.13-1+0~20251023.80+debian13~1.gbp1a2b3c SUD83=8.3.27-1+0~20251023.80+debian13~1.gbp1a2b3c
+ydeb() {
+  yreset
+  printf '%s\n' 'PRETTY_NAME="Debian GNU/Linux 13 (trixie)"' 'VERSION_ID="13"' 'VERSION_CODENAME=trixie' 'ID=debian' >"$(y /etc/os-release)"
+  rm "$(y /etc/apt/sources.list.d/ondrej-ubuntu-php-noble.sources)" "$(y /var/lib/apt/lists)"/*
+  printf 'deb https://packages.sury.org/php/ trixie main\n' >"$(y /etc/apt/sources.list.d/php.list)"
+  printf '%s\n' 'Origin: deb.sury.org' 'Label: PHP' 'Suite: trixie' 'Codename: trixie' \
+    >"$(y /var/lib/apt/lists/packages.sury.org_php_dists_trixie_InRelease)"
+  printf 'ii |%s|%s\n' php8.4-fpm 8.4.11-1 php8.4-common 8.4.11-1 php8.3-fpm "$SUD83" php8.3-common "$SUD83" \
+    >"$WORK/hosts/web-y/dpkg-query.txt"
+  rm "$WORK/hosts/web-y/madison"/*
+  for p in php8.4-fpm php8.4-common; do
+    printf ' %s | %s | %s\n' "$p" "$SUD84" 'https://packages.sury.org/php trixie/main amd64 Packages' \
+      "$p" 8.4.11-1 'http://deb.debian.org/debian trixie/main amd64 Packages' >"$WORK/hosts/web-y/madison/$p.txt"
+  done
+  for p in php8.3-fpm php8.3-common; do
+    printf ' %s | %s | %s\n' "$p" "$SUD83" 'https://packages.sury.org/php trixie/main amd64 Packages' >"$WORK/hosts/web-y/madison/$p.txt"
+  done
+}
+ydeb
+AT=$(bash "$S/run.sh" autoupdate web-y); code=$?
+eq "$code" 0 "web-y on Debian: exit 0"
+has "$AT" "kind=pin host=web-y branch=8.4 file=/etc/apt/preferences.d/php2shell-php8.4.pref action=written" \
+  "web-y on Debian: Debian's plain 8.4.11-1 is a distro build, pinned off the PPA"
+has "$(cat "$(y /etc/apt/preferences.d/php2shell-php8.4.pref)" 2>/dev/null)" "Pin: origin packages.sury.org" "web-y on Debian: the pin names sury's site"
+has "$AT" "kind=policy host=web-y branch=8.4 origin=distro package=php8.4-fpm installed=8.4.11-1 before=$SUD84 candidate=8.4.11-1 candidate_origin=distro moved=- pin=/etc/apt/preferences.d/php2shell-php8.4.pref state=kept before_origin=ppa" \
+  "web-y on Debian: sury's 8.4.13 was the candidate before the pin, Debian's after it"
+has "$AT" "kind=policy host=web-y branch=8.3 origin=ppa package=php8.3-fpm installed=$SUD83 before=$SUD83 candidate=$SUD83 candidate_origin=ppa moved=- pin=- state=kept" \
+  "web-y on Debian: sury's 8.3 build is the PPA's, not pinned"
+has "$(cat "$(y $UUC)" 2>/dev/null)" '"deb.sury.org:trixie"' "web-y on Debian: sury's origin accepted"
 
 # The dry run fails: the origin entry it was asked to accept is taken out again, the pin stays.
 yreset
