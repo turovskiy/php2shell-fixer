@@ -88,6 +88,8 @@ On Ubuntu, unattended-upgrades installs security updates from Ubuntu only. PHP f
 bash scripts/run.sh autoupdate <host>
 ```
 
+Know what you switch on before running it. The ondrej PPA has no separate security section, so once it is in unattended-upgrades, the server installs every new PHP build the PPA publishes, not only CVE fixes, on the unattended-upgrades schedule, and the package restarts PHP-FPM as it installs. Libraries the PPA ships alongside PHP update the same way. Tell the client that PHP on that server now updates by itself, and decide per server whether that is acceptable.
+
 Before anything else it checks that the PPA has not changed its Release info (Origin, Label) since apt last downloaded it. If it has, the command writes nothing and prints the `apt-get update --allow-releaseinfo-change-...` command for you to run once you have checked the change. Only the PHP PPA counts: `ondrej/nginx` or `ondrej/apache2` on the same server never gets into unattended-upgrades.
 
 Then it does three things, in this order:
