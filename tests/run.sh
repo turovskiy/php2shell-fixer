@@ -604,6 +604,22 @@ $(p2s_url_origin http://deb.debian.org/debian trixie/main) \
 $(p2s_url_origin http://security.debian.org/debian-security trixie-security/main) \
 $(p2s_url_origin https://repo.example.com/php noble/main)" \
   "ppa ppa distro distro distro other" "source origin: by URL and suite, as apt names the list files"
+# apt-cache policy as apt >= 1.1 prints it on a trixie host with a third-party mirror.
+POL='php8.4-fpm:
+  Installed: 8.4.11-1
+  Candidate: 8.4.11-1+deb13u1
+  Version table:
+     8.4.12-1~deb13u1 500
+        500 https://repo.example.com/php trixie/main amd64 Packages
+     8.4.11-1+deb13u1 500
+        500 http://security.debian.org/debian-security trixie-security/main amd64 Packages
+ *** 8.4.11-1 500
+        500 https://repo.example.com/php trixie/main amd64 Packages
+        500 http://deb.debian.org/debian trixie/main amd64 Packages
+        100 /var/lib/dpkg/status'
+eq "$(p2s_build_origin "$POL" 8.4.11-1) $(p2s_build_origin "$POL" 8.4.11-1+deb13u1) $(p2s_build_origin "$POL" 8.4.12-1~deb13u1) \
+$(p2s_build_origin "$POL" 1:7.4.33-31+ubuntu24.04.1+deb.sury.org+1) $(p2s_build_origin "" 8.4.11-1)" "distro distro distro ppa other" \
+  "build origin: first source that says ppa or distro, else the version string (unknown mirror, build not listed)"
 p2s_changelog_has_cves "  - debian/patches/CVE-2026-109618_109619.patch" && ok "Ubuntu patch name counts as both CVEs" \
   || bad "Ubuntu patch name counts as both CVEs"
 p2s_changelog_has_cves "  - CVE-2026-109618 only" && bad "one CVE alone is not a fix" || ok "one CVE alone is not a fix"
