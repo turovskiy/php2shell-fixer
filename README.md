@@ -2,7 +2,7 @@
 
 Claude Code plugin that audits and patches PHP2Shell (CVE-2026-109618, CVE-2026-109619) on Debian and Ubuntu servers running PHP-FPM or mod_php, and keeps the CVE-2026-115560 mitigation in place.
 
-Work in progress. The plugin audits PHP-FPM hosts, patches them, and keeps the CVE-2026-115560 mitigation in place. mod_php support and keeping PPA PHP updated on its own are coming next. The plan lives in [issue #1](https://github.com/turovskiy/php2shell-fixer/issues/1) and its sub-issues.
+Work in progress. The plugin audits PHP-FPM and Apache mod_php hosts, patches them, keeps the CVE-2026-115560 mitigation in place, and lets PHP from the ondrej PPA update itself. The plan lives in [issue #1](https://github.com/turovskiy/php2shell-fixer/issues/1) and its sub-issues.
 
 ## Install
 
@@ -21,7 +21,7 @@ Ask Claude to check a server for PHP2Shell, or run the scripts yourself:
    bash scripts/run.sh audit <host>
    ```
 
-   `<host>` is an alias from your `~/.ssh/config` or `user@address`. The output is saved to `~/.cache/php2shell/<host>-audit-<time>.log`. The audit also shows, per PHP-FPM and PHP-CGI, whether upload progress is off (see below).
+   `<host>` is an alias from your `~/.ssh/config` or `user@address`. The output is saved to `~/.cache/php2shell/<host>-audit-<time>.log`. The audit also shows, per PHP-FPM, mod_php and PHP-CGI, whether upload progress is off (see below).
 
 2. Build the report from one or more logs:
 
@@ -29,11 +29,11 @@ Ask Claude to check a server for PHP2Shell, or run the scripts yourself:
    bash scripts/report.sh ~/.cache/php2shell/*-audit-*.log
    ```
 
-   You get one table per host: branch, installed build, where it came from (Ubuntu, Debian or the ondrej PPA), whether the service runs, whether the changelog names both CVEs, the verdict with its reason, the build a patch would install (target), and how old the host's apt lists are.
+   You get one table per host: branch, SAPI (`fpm` for PHP-FPM, `apache2` for mod_php), installed build, where it came from (Ubuntu, Debian or the ondrej PPA), whether the service runs, whether the changelog names both CVEs, the verdict with its reason, the build a patch would install (target), and how old the host's apt lists are.
 
 Why not just `php -v`? Ubuntu ships the fix as `8.3.6-0ubuntu0.24.04.13`, and `php -v` still says `8.3.6`. The audit looks at the package version and its changelog instead.
 
-"fixed" in the report is about the installed package. PHP-FPM keeps running the build it started with until it is restarted, so the report also has a Restart column: "needed" means the service started before the last PHP package was installed and still runs the old code. Only "fixed" together with Restart "ok" means the server is safe.
+"fixed" in the report is about the installed package. PHP-FPM and Apache keep running the build they started with until they are restarted, so the report also has a Restart column: "needed" means the service started before the last PHP package was installed and still runs the old code. Only "fixed" together with Restart "ok" means the server is safe.
 
 Under the tables the report lists host facts that help decide how to patch: which site runs on which PHP-FPM pool (a pool no site uses is marked as a stop candidate), held PHP packages, the ondrej PPA sources and whether the PPA changed its Release info (then `apt-get update` refuses it until you accept the change), and whether unattended-upgrades covers the PPA at all. To check the Release info the audit downloads the PPA's current `InRelease` file into a temp folder and deletes it right after, the same way it handles candidate packages.
 
@@ -47,10 +47,10 @@ Two commands read those logs later:
 
 ```
 bash scripts/report.sh --latest   # the newest log per server, one report
-bash scripts/next.sh --latest     # what to do next on each server: audit, fix, ensure, verify or done
+bash scripts/next.sh --latest     # what to do next on each server: audit, fix, ensure, autoupdate, verify or done
 ```
 
-Write commands (`ensure`) are never cut off by a time limit, even if a server is slow: a session killed in the middle of apt or a reload leaves the server half changed. Only the read-only audit has a limit (10 minutes per server by default). A dropped connection is another matter: if your laptop sleeps or the network goes, the server most likely stops the command where it was. For `ensure` that is harmless (run it again), but keep the connection up until it finishes.
+Write commands (`ensure`, `autoupdate`) are never cut off by a time limit, even if a server is slow: a session killed in the middle of apt or a reload leaves the server half changed. Only the read-only audit has a limit (10 minutes per server by default). A dropped connection is another matter: if your laptop sleeps or the network goes, the server most likely stops the command where it was. For `ensure` that is harmless (run it again), but keep the connection up until it finishes.
 
 ## Patch a server
 
@@ -58,7 +58,7 @@ Write commands (`ensure`) are never cut off by a time limit, even if a server is
 bash scripts/run.sh fix <host>
 ```
 
-This is the write that closes PHP2Shell. For every running PHP-FPM branch it installs the build the audit names as the target, with every package of that PHP version pinned to the same version; PECL extensions such as `php8.3-redis` keep their own versions. It also puts the upload_progress mitigation in place, runs the config test, restarts only the pools it changed, and compares each PHP site's HTTP status code before and after. On PHP 8.5 without a fixed build it also turns off `fatal_error_backtraces`.
+This is the write that closes PHP2Shell. For every PHP branch that serves requests through PHP-FPM or Apache mod_php it installs the build the audit names as the target, with every package of that PHP version pinned to the same version; PECL extensions such as `php8.3-redis` keep their own versions. It also puts the upload_progress mitigation in place, runs the config test (`php-fpm -t` for a pool, `apachectl configtest` for mod_php), restarts only the pools, or Apache, it changed, and compares the HTTP status code of each nginx PHP site and each Apache vhost before and after. Each vhost is asked on its own port and address: https on 443, plain http on any other port. For mod_php the restart is a full `systemctl restart apache2`, so every Apache site on the server is down for a few seconds: run the first mod_php patch on a client server at a quiet hour and watch it. When a config test fails, the new ini is removed and the service is not restarted. On PHP 8.5 without a fixed build it also turns off `fatal_error_backtraces`.
 
 It stops before touching anything when a PHP package is held, when `apt-get update` fails, or when the ondrej PPA changed its Release info; in that last case it prints the `apt-get update --allow-releaseinfo-change-...` command for you to run once you have checked the change. It never accepts it on its own.
 
@@ -66,19 +66,39 @@ The patch runs on the server as its own systemd unit, not inside your ssh sessio
 
 ## Keep the mitigation in place
 
-CVE-2026-115560 has no fix yet. Until PHP ships one, the protection is `session.upload_progress.enabled = 0` in every web SAPI (PHP-FPM and PHP-CGI). This command puts it in place and keeps it there:
+CVE-2026-115560 has no fix yet. Until PHP ships one, the protection is `session.upload_progress.enabled = 0` in every web SAPI (PHP-FPM, mod_php and PHP-CGI). This command puts it in place and keeps it there:
 
 ```
 bash scripts/run.sh ensure <host>
 ```
 
-It writes `99-security.ini` into `conf.d` where the file is missing or outdated, runs the config test, and reloads only the PHP-FPM pools it changed. If the test fails, it puts the old file back and leaves the pool running. Running it again on a host that is already fine changes nothing.
+It writes `99-security.ini` into `conf.d` where the file is missing or outdated, runs the config test, and reloads only the PHP-FPM pools, or Apache, it changed. If the test fails, it puts the old file back and leaves the pool or Apache running. Running it again on a host that is already fine changes nothing.
 
-It does not touch a `99-security.ini` someone else wrote, and it does not edit pool configs. If a pool turns upload progress back on (`php_admin_flag[session.upload_progress.enabled] = on`), the command exits with code 3 and names the file and line, and you fix it by hand. CLI is left alone: it serves no web requests.
+It does not touch a `99-security.ini` someone else wrote, and it does not edit pool or Apache configs. If a pool turns upload progress back on (`php_admin_flag[session.upload_progress.enabled] = on`), or Apache config does (`php_admin_flag session.upload_progress.enabled on`, in any file Apache reads, your own `Include` files too), the command exits with code 3 and names the file and line, and you fix it by hand. `.htaccess` files are not checked. CLI is left alone: it serves no web requests.
 
 This is a write on the server, so run it yourself or approve it when Claude asks.
 
 `ensure` also leaves an apt hook on the server: after every package install or upgrade, apt runs the same check again, so a PHP version you install next month gets the protection too. The hook lives in two files, `/etc/apt/apt.conf.d/99php2shell-ensure` and `/usr/local/sbin/php2shell-ensure`, and writes what it did to `/var/log/php2shell-ensure.log`. It can never make apt fail. To remove it, delete both files. The audit shows whether the hook is in place and up to date.
+
+## Keep PPA PHP updated
+
+On Ubuntu, unattended-upgrades installs security updates from Ubuntu only. PHP from the ondrej PPA stays on whatever version was installed until someone upgrades it by hand. Adding the PPA to unattended-upgrades is not enough on its own: a PHP version that came from Ubuntu would then start pulling builds from the PPA, and a PPA build with a higher number is not always a fixed one.
+
+```
+bash scripts/run.sh autoupdate <host>
+```
+
+Before anything else it checks that the PPA has not changed its Release info (Origin, Label) since apt last downloaded it. If it has, the command writes nothing and prints the `apt-get update --allow-releaseinfo-change-...` command for you to run once you have checked the change. Only the PHP PPA counts: `ondrej/nginx` or `ondrej/apache2` on the same server never gets into unattended-upgrades.
+
+Then it does three things, in this order:
+
+1. For every PHP version installed from Ubuntu or Debian that the PPA also ships, it writes a pin that keeps the PPA builds away from it: `/etc/apt/preferences.d/php2shell-php8.3.pref` with `Pin-Priority: -1`. The `.pref` ending matters. apt reads only files in that folder with no extension or with `.pref`, and `php8.3` alone already counts as having one (`.3`).
+2. It asks apt (`apt-cache policy`) which build it would now install for every PHP package, and where each build comes from, by the source apt lists for it rather than by the version number. If any package would switch between Ubuntu or Debian and the PPA, or a pinned PHP version still has a PPA build apt does not hold off (a pin that does nothing, even while the PPA build happens to be older), the command stops, names the PHP version and the pin that does not work, and goes no further. The pins it wrote stay: they only keep each version where it is.
+3. It adds the PPA to the list unattended-upgrades accepts (`/etc/apt/apt.conf.d/51php2shell-ppa-origins`) and runs `unattended-upgrade --dry-run` to check the PPA shows up and that unattended-upgrades would not now upgrade an Ubuntu or Debian PHP package from the PPA. If either check fails, that file is taken out again. If your connection drops before the check is done, the file is put back as it was.
+
+If a server already has an equivalent pin or PPA entry, under any file name, the command finds it by content and writes nothing twice. A pin under a name apt skips (for example `ondrej-php.conf`) shows up in step 2, and the command tells you what to rename it to. On a server without the PPA it writes nothing. Every run ends with the commands that undo what it wrote; a file it had to overwrite is kept first in `/var/lib/php2shell/backup`, and the undo command copies it back.
+
+This is a write on the server, so run it yourself or approve it when Claude asks.
 
 ## Tests
 

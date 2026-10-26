@@ -1,6 +1,6 @@
-# Host facts that decide how to patch: which site runs on which FPM pool, whether FPM restarted after
-# the last PHP install, held packages, the ondrej/sury sources and their Release info, unattended-upgrades.
-# Read-only. Sourced after p2s.sh; used by audit.sh.
+# Host facts that decide how to patch: which site runs on which FPM pool (and which sites Apache serves),
+# whether FPM restarted after the last PHP install, held packages, the ondrej/sury sources and their Release
+# info, unattended-upgrades. Read-only. Sourced after p2s.sh; used by audit.sh, fix.sh and autoupdate.sh.
 
 # Sites from "nginx -T" output (effective config: symlinked and included files count). Prints one
 # "names|pass" line per fastcgi_pass in a server block, names comma-joined ("-" without server_name).
@@ -45,6 +45,21 @@ p2s_nginx_sites() { # $1 nginx -T output
         else print site[i]
       }
     }' <<<"$1"
+}
+
+# Vhosts from "apachectl -S" output (Apache's own vhost dump, so symlinked and included sites count), one
+# "name|port|address" per line, sorted, each once: name-based vhosts ("port 443 namevhost <name>", "default
+# server <name>") under their "<address>:<port> is a NameVirtualHost" line, their aliases, and single vhosts
+# ("*:80 <name> (<file>:<line>)"). The address is "-" for any (* or _default_). Wildcard aliases are skipped.
+p2s_apache_sites() { # $1 apachectl -S output
+  awk '
+    function at(ap) { port = ap; sub(/^.*:/, "", port); addr = ap; sub(/:[^:]*$/, "", addr)
+      if (addr == "*" || addr == "_default_") addr = "-" }
+    $1 ~ /:[0-9]+$/ && $2 == "is" && $3 == "a" { at($1); next }
+    $1 == "port" && $3 == "namevhost" { port = $2; print $4 "|" port "|" addr; next }
+    $1 == "default" && $2 == "server" { print $3 "|" port "|" addr; next }
+    $1 == "alias" { print $2 "|" port "|" addr; next }
+    $1 ~ /:[0-9]+$/ && $3 ~ /^\(/ { at($1); print $2 "|" port "|" addr }' <<<"$1" | sort -u
 }
 
 # Do an FPM listen address and an nginx fastcgi_pass point at the same socket?
@@ -122,6 +137,34 @@ p2s_inrelease_name() { # $1 uri, $2 suite
 # The Release fields apt refuses to see change without consent, one "Field: value" per line.
 p2s_release_info() { # $1 InRelease text
   grep -E '^(Origin|Label|Suite|Codename):' <<<"$1" | sort
+}
+
+# Has a source's Release info changed since apt cached it? apt-get update refuses such a source until someone
+# accepts the change. The fresh InRelease goes into a temp file that is removed again; nothing else is
+# written. Prints "<same|changed|unknown> <changed fields, comma-joined, or ->", then for a change the
+# differing lines ("  cached: Label: ...", "  remote: Label: ..."). unknown: no cached InRelease, no
+# apt-helper, or the fetch failed.
+p2s_release_check() { # $1 uri, $2 suite
+  local cached helper dest old new info=unknown changed=- diffs=""
+  cached=$(p2s_path /var/lib/apt/lists)/$(p2s_inrelease_name "$1" "$2")
+  helper=$(p2s_path /usr/lib/apt/apt-helper)
+  if [ -f "$cached" ] && [ -x "$helper" ] && dest=$(mktemp); then
+    if timeout 30 "$helper" -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 \
+      download-file "${1%/}/dists/$2/InRelease" "$dest" </dev/null >/dev/null 2>&1; then
+      old=$(p2s_release_info "$(cat "$cached")")
+      new=$(p2s_release_info "$(cat "$dest")")
+      if [ "$old" = "$new" ]; then
+        info=same
+      else
+        info=changed
+        changed=$(diff <(echo "$old") <(echo "$new") | sed -nE 's/^[<>] ([A-Za-z]+):.*/\1/p' | sort -u | paste -sd, -)
+        diffs=$(diff <(echo "$old") <(echo "$new") | sed -nE 's/^< /  cached: /p; s/^> /  remote: /p')
+      fi
+    fi
+    rm -f "$dest"
+  fi
+  echo "$info $changed"
+  [ -z "$diffs" ] || printf '%s\n' "$diffs"
 }
 
 # Encode a value for a record: records split on spaces.

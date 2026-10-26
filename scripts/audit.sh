@@ -3,9 +3,9 @@
 # branch.sh):
 # run.sh audit <host>
 # Output: a human-readable section plus "@p2s" records (schema in p2s.sh): one "branch" record per PHP-FPM
-# branch with its verdict and target, one "candidate" record per build apt offers for it, and one
-# "mitigation" record (plus "override" records) per web SAPI, then the host facts: web servers, sites and
-# pools, held packages, PPA sources with their Release info, unattended-upgrades.
+# or mod_php (SAPI apache2) branch with its verdict and target, one "candidate" record per build apt offers
+# for it, and one "mitigation" record (plus "override" records) per web SAPI, then the host facts: web
+# servers, sites and pools, held packages, PPA sources with their Release info, unattended-upgrades.
 set -u
 export LC_ALL=C
 
@@ -15,28 +15,30 @@ os=$(p2s_os)
 echo "== php2shell audit: $host ($os)"
 p2s_record kind=host host="$host" os="$os"
 
-# Installed PHP-FPM packages of a versioned branch (php8.3-fpm), not the php-fpm metapackage or removed ones.
-pkgs=$(dpkg-query -W -f='${db:Status-Abbrev}|${binary:Package}|${Version}\n' 'php*-fpm' </dev/null 2>/dev/null \
-  | awk -F'|' '$1 ~ /^ii/ && $2 ~ /^php[0-9]+\.[0-9]+-fpm$/ {print $2 "|" $3}')
-[ -n "$pkgs" ] || echo "no PHP-FPM branch installed"
+# Installed PHP-FPM and mod_php packages of a versioned branch, one "branch|sapi|package|version" per line.
+pkgs=$(p2s_branch_packages)
+[ -n "$pkgs" ] || echo "no PHP-FPM or mod_php branch installed"
 
 # Candidate .debs are fetched into one temp dir that goes away however the audit ends.
 P2S_TMP=$(mktemp -d)
 trap 'rm -rf "$P2S_TMP"' EXIT
 
-while IFS='|' read -r pkg ver; do
-  [ -n "$pkg" ] || continue
-  branch=${pkg#php}
-  branch=${branch%-fpm}
-  active=$(systemctl is-active "php$branch-fpm" </dev/null 2>/dev/null)
-  p2s_branch_eval "$host" "$branch" "$ver"
-  read -r started installed_at restart <<<"$(p2s_restart_state "$branch" "$active")"
+while IFS='|' read -r branch sapi pkg ver; do
+  [ -n "$branch" ] || continue
+  # mod_php counts as running only while Apache loads it; an installed module left disabled serves nothing.
+  if [ "$sapi" = apache2 ] && ! p2s_modphp_loaded "$branch"; then
+    active=not-loaded
+  else
+    active=$(systemctl is-active "$(p2s_sapi_unit "$branch" "$sapi")" </dev/null 2>/dev/null)
+  fi
+  p2s_branch_eval "$host" "$branch" "$ver" "$pkg" "$sapi"
+  read -r started installed_at restart <<<"$(p2s_restart_state "$branch" "$active" "$sapi")"
 
-  echo "php$branch fpm: $ver ($BR_ORIGIN, $active), CVEs in changelog: $BR_CVE -> $BR_VERDICT ($BR_REASON), target $BR_TARGET ($BR_TREASON)"
+  echo "php$branch $sapi: $ver ($BR_ORIGIN, $active), CVEs in changelog: $BR_CVE -> $BR_VERDICT ($BR_REASON), target $BR_TARGET ($BR_TREASON)"
   echo "  started $started, packages installed $installed_at: restart $restart"
   echo "  $BR_ORIGIN apt lists last changed: $BR_LISTS (older than the fixes: $BR_STALE)"
   [ ${#BR_CHUMAN[@]} -eq 0 ] || printf '%s\n' "${BR_CHUMAN[@]}"
-  p2s_record kind=branch host="$host" branch="$branch" sapi=fpm installed="$ver" origin="$BR_ORIGIN" \
+  p2s_record kind=branch host="$host" branch="$branch" sapi="$sapi" installed="$ver" origin="$BR_ORIGIN" \
     active="${active:-unknown}" cve_changelog="$BR_CVE" verdict="$BR_VERDICT" reason="$BR_REASON" \
     target="$BR_TARGET" target_reason="$BR_TREASON" lists_updated="$BR_LISTS" lists_stale="$BR_STALE" \
     started="$started" installed_at="$installed_at" restart="$restart"
@@ -70,10 +72,8 @@ echo "nginx: $nginx_state, apache2: $apache"
 sites=$(p2s_nginx_sites "$ngx")
 
 pools=()
-while IFS='|' read -r pkg ver; do
-  [ -n "$pkg" ] || continue
-  branch=${pkg#php}
-  branch=${branch%-fpm}
+while IFS='|' read -r branch sapi pkg ver; do
+  [ "$sapi" = fpm ] || continue
   while IFS='|' read -r pool listen; do
     [ -n "$pool" ] || continue
     pools+=("$branch|$pool|$listen")
@@ -114,28 +114,12 @@ while read -r held; do
 done <<<"$(apt-mark showhold </dev/null 2>/dev/null | grep -E '^(php|libapache2-mod-php)')"
 
 # PPA sources, and whether their Release info changed since the cached lists: apt-get update refuses such a
-# source until someone accepts the change. The fresh InRelease is fetched into the temp dir; nothing else.
-helper=$(p2s_path /usr/lib/apt/apt-helper)
+# source until someone accepts the change.
 while IFS='|' read -r file uri suite; do
   [ -n "$uri" ] || continue
-  cached=$(p2s_path /var/lib/apt/lists)/$(p2s_inrelease_name "$uri" "$suite")
-  info=unknown changed=-
-  if [ -f "$cached" ] && [ -x "$helper" ]; then
-    dest=$P2S_TMP/InRelease.$suite
-    if timeout 30 "$helper" -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 \
-      download-file "${uri%/}/dists/$suite/InRelease" "$dest" </dev/null >/dev/null 2>&1; then
-      old=$(p2s_release_info "$(cat "$cached")")
-      new=$(p2s_release_info "$(cat "$dest")")
-      if [ "$old" = "$new" ]; then
-        info=same
-      else
-        info=changed
-        changed=$(diff <(echo "$old") <(echo "$new") | sed -nE 's/^[<>] ([A-Za-z]+):.*/\1/p' | sort -u | paste -sd, -)
-        diff <(echo "$old") <(echo "$new") | sed -nE 's/^< /  cached: /p; s/^> /  remote: /p'
-      fi
-    fi
-    rm -f "$dest"
-  fi
+  rc=$(p2s_release_check "$uri" "$suite")
+  read -r info changed <<<"$(head -1 <<<"$rc")"
+  tail -n +2 <<<"$rc"
   p2s_record kind=source host="$host" file="$file" uri="$uri" suite="$suite" release_info="$info" changed="$changed"
   echo "source $uri $suite ($file): release info $info$([ "$changed" = - ] || echo " ($changed)")"
 done <<<"$(p2s_php_sources)"
@@ -145,7 +129,7 @@ cfg=$(apt-config dump </dev/null 2>/dev/null)
 periodic=$(sed -nE 's/^APT::Periodic::Unattended-Upgrade "([^"]*)";$/\1/p' <<<"$cfg" | tail -1)
 origins=$(sed -nE 's/^Unattended-Upgrade::(Allowed-Origins|Origins-Pattern):: "([^"]*)";$/\2/p' <<<"$cfg")
 covered=no
-grep -qiE 'ondrej' <<<"$origins" && covered=yes
+grep -qiE 'ondrej|sury' <<<"$origins" && covered=yes
 p2s_record kind=autoupdate host="$host" periodic="${periodic:-unset}" origins="$(grep -c . <<<"$origins")" ppa_covered="$covered"
 while IFS= read -r o; do
   [ -n "$o" ] && p2s_record kind=uu_origin host="$host" value="$(p2s_enc "$o")"

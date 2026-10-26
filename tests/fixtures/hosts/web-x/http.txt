@@ -1,0 +1,4 @@
+api.example.com 200 200
+shop.example.com 200 200
+www.shop.example.com 301 301
+blog.example.org 200 200
