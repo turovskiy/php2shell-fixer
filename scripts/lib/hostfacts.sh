@@ -100,7 +100,16 @@ p2s_fpm_pools() { # $1 branch
 }
 
 # Enabled apt sources of the ondrej/sury PPA, one "file|uri|suite" per line (one-line and deb822 format).
-p2s_php_sources() {
+p2s_php_sources() { p2s_apt_sources | awk -F'|' '$2 ~ /(ondrej|sury)/'; }
+
+# Is an Ubuntu Pro ESM source enabled (esm.ubuntu.com, Infra, Apps or Legacy)? yes | no
+p2s_esm_source() {
+  p2s_apt_sources | awk -F'|' '$2 ~ /:\/\/esm\.ubuntu\.com(\/|$)/ { f = 1 } END { print (f ? "yes" : "no") }'
+}
+
+# Every enabled apt source, one "file|uri|suite" per line, from sources.list and sources.list.d (one-line and
+# deb822 format).
+p2s_apt_sources() {
   local f
   for f in "$(p2s_path /etc/apt/sources.list)" "$(p2s_path /etc/apt/sources.list.d)"/*.list \
     "$(p2s_path /etc/apt/sources.list.d)"/*.sources; do
@@ -124,7 +133,7 @@ p2s_php_sources() {
           }' "$f"
         ;;
     esac
-  done | awk -F'|' '$2 ~ /(ondrej|sury)/'
+  done
 }
 
 # Name apt gives the cached InRelease of a source: https://ppa.launchpadcontent.net/ondrej/php/ubuntu + noble

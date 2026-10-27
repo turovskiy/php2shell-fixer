@@ -625,6 +625,23 @@ eq "$(P2S_ROOT=$WORK/no-such-root P2S_RELEASE='' p2s_verdict 8.3 8.3.6-0ubuntu0.
   "no os-release: no distro threshold"
 eq "$(P2S_ROOT=$WORK/hosts/web-e/root P2S_RELEASE='' p2s_release) $(P2S_ROOT=$WORK/hosts/web-c/root P2S_RELEASE='' p2s_release)" "22.04 12" \
   "release from the host's os-release"
+eq "$(REL=20.04 vd 7.4 7.4.3-4ubuntu2.29+esm5 no)" "fixed distro-threshold" "Ubuntu 20.04 ESM build esm5 fixed"
+eq "$(REL=20.04 vd 7.4 7.4.3-4ubuntu2.29+esm4 no)" "unfixed below-threshold" "Ubuntu 20.04 ESM build esm4 unfixed"
+eq "$(REL=18.04 vd 7.2 7.2.24-0ubuntu0.18.04.17+esm14 no)" "fixed distro-threshold" "Ubuntu 18.04 ESM build esm14 fixed"
+# shellcheck source=../scripts/lib/branch.sh
+. "$S/lib/branch.sh"
+eq "$(p2s_release_gap debian-11 no)|$(p2s_release_gap ubuntu-20.04 no)|$(p2s_release_gap ubuntu-20.04 yes)|$(p2s_release_gap ubuntu-24.04 no)|$(p2s_release_gap debian-12 no)" \
+  "no-fix-for-release|fix-only-in-esm|||" "release gap: Debian 11 none, 20.04 ESM only without ESM, supported releases none"
+E1=$WORK/esm-roots
+mkdir -p "$E1/a/etc/apt/sources.list.d" "$E1/b/etc/apt/sources.list.d" "$E1/c/etc/apt/sources.list.d" "$E1/d/etc/apt"
+printf '%s\n' 'Types: deb' 'URIs: https://esm.ubuntu.com/infra/ubuntu' 'Suites: focal-infra-security' 'Components: main' \
+  >"$E1/a/etc/apt/sources.list.d/ubuntu-esm-infra.sources"
+echo 'deb https://esm.ubuntu.com/apps/ubuntu focal-apps-security main' >"$E1/b/etc/apt/sources.list.d/ubuntu-esm-apps.list"
+printf '%s\n' 'Types: deb' 'URIs: https://esm.ubuntu.com/infra/ubuntu' 'Suites: focal-infra-security' 'Components: main' 'Enabled: no' \
+  >"$E1/c/etc/apt/sources.list.d/ubuntu-esm-infra.sources"
+echo 'deb http://archive.ubuntu.com/ubuntu focal main' >"$E1/d/etc/apt/sources.list"
+eq "$(P2S_ROOT=$E1/a p2s_esm_source) $(P2S_ROOT=$E1/b p2s_esm_source) $(P2S_ROOT=$E1/c p2s_esm_source) $(P2S_ROOT=$E1/d p2s_esm_source)" \
+  "yes yes no no" "ESM source: deb822 and one-line count, a disabled one and the archive do not"
 eq "$(vd 8.0 1:8.0.30-9+ubuntu24.04.1+deb.sury.org+1 missing)" "unfixed no-cve-in-changelog" "missing changelog is not a fix"
 eq "$(p2s_origin 8.3.6-0ubuntu0.24.04.13) $(p2s_origin 1:7.4.33-31+ubuntu24.04.1+deb.sury.org+1) $(p2s_origin 8.2.29-1~deb12u1) $(p2s_origin 8.3.36-1)" \
   "distro ppa distro other" "origin: Ubuntu, sury, Debian, other"
@@ -1265,6 +1282,67 @@ touch -d '2026-10-24 06:00:00 UTC' "$WORK/hosts/web-m/root/var/lib/apt/lists/sec
 SA=$(P2S_CACHE=$WORK/cache-deb bash "$S/run.sh" audit web-m)
 has "$SA" "branch=8.5 sapi=fpm installed=8.5.9-0ubuntu2 origin=distro active=active cve_changelog=no verdict=unfixed reason=below-threshold target=none target_reason=fixed-distro-build-not-in-cached-lists" \
   "Ubuntu 26.10: 8.5.9-0ubuntu2 unfixed, though above 26.04's fixed 8.5.4-0ubuntu1.5"
+
+echo "▸ releases without a free fix"
+# web-m as a distro php7.4 host on a release that gets no free fix: Debian 11 (none at all) and Ubuntu 20.04
+# (only in Ubuntu Pro's ESM pockets). Logs go to their own cache, so next.sh reads only these runs.
+old74() { # old74 <id> <version_id> <codename> <installed> <source uri> <suite/component>
+  rm -rf "$WORK/hosts/web-m"
+  cp -a "$WORK/web-m.ubuntu" "$WORK/hosts/web-m"
+  local m=$WORK/hosts/web-m
+  rm -rf "$m/debs" "$m/madison"/* "$m/root/usr/share/doc"/* "$m/root/var/lib/apt/lists" "$m/root/etc/php/8.5"
+  mv "$m/root/etc/php/8.3" "$m/root/etc/php/7.4"
+  sed -i 's/8\.3/7.4/' "$m/root/etc/php/7.4/fpm/pool.d/www.conf" "$m/root/etc/nginx/sites-enabled/shop"
+  printf '%s\n' "VERSION_ID=\"$2\"" "VERSION_CODENAME=$3" "ID=$1" >"$m/root/etc/os-release"
+  printf 'ii |%s|%s\n' php7.4-fpm "$4" php7.4-common "$4" php7.4-cli "$4" >"$m/dpkg-query.txt"
+  echo php7.4-fpm >"$m/active.txt"
+  printf ' php7.4-fpm | %s | %s amd64 Packages\n' "$4" "$5 $6" >"$m/madison/php7.4-fpm.txt"
+  mkdir -p "$m/root/usr/share/doc/php7.4-common" "$m/root/var/lib/apt/lists" "$m/root/etc/apt/sources.list.d"
+  printf '%s\n' "php7.4 ($4) $3; urgency=medium" '  * Security update' \
+    | gzip -n >"$m/root/usr/share/doc/php7.4-common/changelog.Debian.gz"
+  echo "deb $5 ${6%%/*} ${6#*/}" >"$m/root/etc/apt/sources.list"
+  local u=${5#*://}
+  touch -d '2026-10-24 06:00:00 UTC' "$m/root/var/lib/apt/lists/${u//\//_}_dists_${6%%/*}_${6#*/}_binary-amd64_Packages"
+}
+NF=$WORK/cache-nofix
+old74 debian 11 bullseye 7.4.33-1+deb11u10 http://deb.debian.org/debian bullseye/main
+NA=$(P2S_CACHE=$NF bash "$S/run.sh" audit web-m)
+has "$NA" "branch=7.4 sapi=fpm installed=7.4.33-1+deb11u10 origin=distro active=active cve_changelog=no verdict=unfixed reason=no-cve-in-changelog target=none target_reason=no-fix-for-release" \
+  "Debian 11: distro php7.4 has no fix to install, and the reason says so"
+NR=$(bash "$S/report.sh" "$(ls "$NF"/web-m-audit-*.log | tail -1)")
+has "$NR" '| none (no-fix-for-release) | 2026-10-24 |' "report: no-fix branch shows its reason, lists not flagged"
+has "$NR" '- **php7.4 fpm: debian-11 ships no fix**; `apt-get update` will not bring one.' "report: no-fix note under the table"
+NN=$(bash "$S/next.sh" "$(ls "$NF"/web-m-audit-*.log | tail -1)")
+hasnt "$NN" "web-m: fix" "next: a no-fix branch does not send the host to fix"
+hasnt "$NN" "apt-get update" "next: a no-fix branch never suggests apt-get update"
+NFX=$(P2S_CACHE=$NF bash "$S/run.sh" fix web-m); code=$?
+eq "$code" 3 "Debian 11 fix: mitigated only -> exit 3"
+has "$NFX" "kind=fix host=web-m branch=7.4 before=7.4.33-1+deb11u10 after=7.4.33-1+deb11u10 target=none fixed=no restart=not-needed modules=same state=unfixed-mitigated sapi=fpm target_reason=no-fix-for-release" \
+  "Debian 11 fix: the fix record carries the no-fix reason"
+NN=$(P2S_CACHE=$NF bash "$S/next.sh" --latest)
+has "$NN" "web-m: verify - fix finished after the last audit" "next: a fix left with only no-fix branches is finished, not repeated"
+P2S_CACHE=$NF bash "$S/run.sh" ensure web-m >/dev/null
+P2S_CACHE=$NF bash "$S/run.sh" audit web-m >/dev/null
+NN=$(P2S_CACHE=$NF bash "$S/next.sh" --latest)
+has "$NN" "web-m: manual - mitigated, but no patch can close it here: php7.4: the distro ships no fix for this release" \
+  "next: mitigated no-fix host -> manual, with what closes it"
+old74 ubuntu 20.04 focal 7.4.3-4ubuntu2.29 http://archive.ubuntu.com/ubuntu focal-updates/universe
+EA=$(P2S_CACHE=$WORK/cache-esm bash "$S/run.sh" audit web-m)
+has "$EA" "branch=7.4 sapi=fpm installed=7.4.3-4ubuntu2.29 origin=distro active=active cve_changelog=no verdict=unfixed reason=below-threshold target=none target_reason=fix-only-in-esm" \
+  "Ubuntu 20.04 without ESM: the fix is only in Ubuntu Pro ESM"
+ER=$(bash "$S/report.sh" "$(ls "$WORK"/cache-esm/web-m-audit-*.log | tail -1)")
+has "$ER" '- **php7.4 fpm: ubuntu-20.04 gets the fix only from Ubuntu Pro ESM** (USN-8948-2)' "report: ESM-only note under the table"
+ESM=7.4.3-4ubuntu2.29+esm5
+printf '%s\n' 'Types: deb' 'URIs: https://esm.ubuntu.com/infra/ubuntu' 'Suites: focal-infra-security focal-infra-updates' \
+  'Components: main' >"$WORK/hosts/web-m/root/etc/apt/sources.list.d/ubuntu-esm-infra.sources"
+printf ' php7.4-fpm | %s | %s\n' "$ESM" 'https://esm.ubuntu.com/infra/ubuntu focal-infra-security/main amd64 Packages' \
+  >>"$WORK/hosts/web-m/madison/php7.4-fpm.txt"
+touch -d '2026-10-24 06:00:00 UTC' "$WORK/hosts/web-m/root/var/lib/apt/lists/esm.ubuntu.com_infra_ubuntu_dists_focal-infra-security_main_binary-amd64_Packages"
+EA=$(P2S_CACHE=$WORK/cache-esm bash "$S/run.sh" audit web-m)
+has "$EA" "kind=candidate host=web-m branch=7.4 version=$ESM origin=distro cve_changelog=download-failed verdict=fixed reason=distro-threshold" \
+  "Ubuntu 20.04 with ESM: the ESM build is fixed by the 20.04 threshold"
+has "$EA" "installed=7.4.3-4ubuntu2.29 origin=distro active=active cve_changelog=no verdict=unfixed reason=below-threshold target=$ESM target_reason=fixed-candidate" \
+  "Ubuntu 20.04 with ESM: target is the ESM build"
 rm -rf "$WORK/hosts/web-m"
 mv "$WORK/web-m.ubuntu" "$WORK/hosts/web-m"
 

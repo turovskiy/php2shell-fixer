@@ -40,15 +40,17 @@ p2s_newest_logs() { # $@ logs
 
 # What a log found, as one line of key=value words:
 # status (ok | exit-<n> | unreachable | timeout | none for a log without run_end), exit, reached (a host
-# record exists), unfixed and restart_needed (branches; a SAPI other than FPM is named, 8.3/apache2),
+# record exists), unfixed and restart_needed (branches; a SAPI other than FPM is named, 8.3/apache2), nofix
+# (unfixed branches whose release gets no free fix, as branch:reason; not in unfixed, a patch cannot close them),
 # unmitigated (branch/sapi:state), overrides (file:line of pool overrides that re-enable upload progress),
 # apache_overrides (the same for Apache config), hook (the apt hook's state: present, missing, outdated),
 # ppa (yes when the log names an ondrej/sury PPA source), ppa_covered (the audit's unattended-upgrades check),
 # keeper (the auto-update keeper's end state), refused (branches the keeper refused), loose_pins (pins that did
-# not hold a branch). "-" stands for none.
+# not hold a branch), probe (the patch's HTTP probe: unchanged, changed, no-sites). "-" stands for none.
 p2s_log_summary() { # $1 log
   awk '
     function add(v, x) { return v == "" ? x : (index("," v ",", "," x ",") ? v : v "," x) }
+    function gap(t) { return t == "no-fix-for-release" || t == "fix-only-in-esm" }
     function bs() { return (r["sapi"] == "" || r["sapi"] == "fpm") ? r["branch"] : r["branch"] "/" r["sapi"] }
     /^@p2s schema=1 / {
       delete r
@@ -56,9 +58,11 @@ p2s_log_summary() { # $1 log
       if (r["kind"] == "host") reached = "yes"
       else if (r["kind"] == "run_end") { status = r["status"]; ex = r["exit"] }
       else if (r["kind"] == "branch") {
-        if (r["verdict"] != "fixed") unf = add(unf, bs())
+        if (r["verdict"] != "fixed" && gap(r["target_reason"])) nf = add(nf, bs() ":" r["target_reason"])
+        else if (r["verdict"] != "fixed") unf = add(unf, bs())
         if (r["restart"] == "needed") rn = add(rn, bs())
       }
+      else if (r["kind"] == "fix" && r["fixed"] == "no" && gap(r["target_reason"])) nf = add(nf, bs() ":" r["target_reason"])
       else if (r["kind"] == "fix" && r["fixed"] == "no") unf = add(unf, bs())
       else if (r["kind"] == "mitigation" && r["state"] != "mitigated") um = add(um, r["branch"] "/" r["sapi"] ":" r["state"])
       else if (r["kind"] == "override" && r["enables"] == "yes") {
@@ -66,6 +70,7 @@ p2s_log_summary() { # $1 log
         else ov = add(ov, r["file"] ":" r["line"])
       }
       else if (r["kind"] == "ensure_hook") hook = r["state"]
+      else if (r["kind"] == "probe_summary") probe = r["state"]
       else if (r["kind"] == "source" || r["kind"] == "ppa") ppa = "yes"
       else if (r["kind"] == "autoupdate") cov = r["ppa_covered"]
       else if (r["kind"] == "keeper") { keeper = r["state"]; if (r["branches"] != "") ref = r["branches"] }
@@ -76,7 +81,9 @@ p2s_log_summary() { # $1 log
         (status == "" ? "none" : status), (ex == "" ? "-" : ex), (reached == "" ? "no" : reached),
         (unf == "" ? "-" : unf), (rn == "" ? "-" : rn), (um == "" ? "-" : um), (ov == "" ? "-" : ov),
         (aov == "" ? "-" : aov), (hook == "" ? "-" : hook)
-      printf " ppa=%s ppa_covered=%s keeper=%s refused=%s loose_pins=%s\n", (ppa == "" ? "no" : ppa),
-        (cov == "" ? "-" : cov), (keeper == "" ? "-" : keeper), (ref == "" ? "-" : ref), (lp == "" ? "-" : lp)
+      printf " ppa=%s ppa_covered=%s keeper=%s refused=%s loose_pins=%s nofix=%s", (ppa == "" ? "no" : ppa),
+        (cov == "" ? "-" : cov), (keeper == "" ? "-" : keeper), (ref == "" ? "-" : ref), (lp == "" ? "-" : lp),
+        (nf == "" ? "-" : nf)
+      printf " probe=%s\n", (probe == "" ? "-" : probe)
     }' "$1"
 }
