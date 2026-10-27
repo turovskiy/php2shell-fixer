@@ -162,10 +162,15 @@ stub() { # stub <name> <body>: a logging stub
 }
 # ssh [-o opt]... <host> 'bash -s': the host is the second-to-last argument. A host with a "sleep" file
 # waits that many seconds first, to exercise the per-host timeout. A host with a "drop-after" file loses the
-# connection after that many seconds: like sshd on a dropped session, the whole session's process group
-# gets SIGHUP and then SIGKILL, children included (255). Only what left the session survives. A host with an
+# connection after that many seconds the hard way: the whole session's process group gets SIGHUP and then
+# SIGKILL, children included (255), as from a session with a pty or an operator's kill. Only what left the
+# session survives. A host with an
 # "fsize-limit" file runs the program with files capped at that many KiB and SIGXFSZ ignored: a write past
 # the cap fails part-way with an error, as on a full disk (output goes through a pipe, which the cap spares).
+# A host with a "close-in-uu" file loses its session with no signal, as when an ssh client goes away from a
+# session without a pty: the program's output runs through a reader whose pid goes to reader.pid, the
+# unattended-upgrade stub kills that reader during the dry run the file names, and the program learns of it
+# only by SIGPIPE on its next write (255).
 stub ssh 'h=${@: -2:1}
 d=$P2S_TEST_HOSTS/$h
 [ -d "$d" ] || { echo "ssh: Could not resolve hostname $h: Name or service not known" >&2; exit 255; }
@@ -175,6 +180,14 @@ if [ -f "$d/drop-after" ]; then
   pid=$!
   sleep "$(cat "$d/drop-after")"
   kill -HUP -- "-$pid" 2>/dev/null; sleep 0.2; kill -9 -- "-$pid" 2>/dev/null
+  echo "Connection to $h closed by remote host." >&2
+  exit 255
+fi
+if [ -f "$d/close-in-uu" ]; then
+  exec 3> >(exec cat)
+  echo "$!" >"$d/reader.pid"
+  P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h bash -s >&3 2>&3 3>&-
+  exec 3>&-
   echo "Connection to $h closed by remote host." >&2
   exit 255
 fi
@@ -385,7 +398,8 @@ for p; do stub_policy "$p"; done'
 # config with ${distro_id} and ${distro_codename} filled in, then the packages it would upgrade: those of
 # uu-upgrades.txt ("<Release Origin> <package>", what this unattended-upgrades would take from which origin)
 # whose origin it accepts, on one "Packages that will be upgraded:" line. fail-uu makes it fail; slow-uu makes
-# it take that many seconds once it accepts the ondrej PPA.
+# it take that many seconds once it accepts the ondrej PPA. close-in-uu ("pre" or "post": before or after it
+# accepts the ondrej PPA) kills the ssh session's reader during that dry run and waits until it is gone.
 stub unattended-upgrade 'cat >/dev/null
 [ -e "$P2S_STUB/fail-uu" ] && { echo "E: unattended-upgrade: apt_pkg.Error: E:Unable to parse package file"; exit 1; }
 . "$P2S_STUBLIB/apt.sh"
@@ -394,7 +408,12 @@ allowed=$(stub_aptconf_dump | sed -nE "s/^Unattended-Upgrade::Allowed-Origins:: 
   | sed "s/\${distro_id}/Ubuntu/g; s/\${distro_codename}/$code/g" | paste -sd, - | sed "s/,o=/, o=/g; s/,origin=/, origin=/g")
 echo "Starting unattended upgrades script"
 echo "Allowed origins are: $allowed"
-case ", $allowed," in *", o=LP-PPA-ondrej-php,"*) [ -f "$P2S_STUB/slow-uu" ] && sleep "$(cat "$P2S_STUB/slow-uu")" ;; esac
+case ", $allowed," in *", o=LP-PPA-ondrej-php,"*) when=post; [ -f "$P2S_STUB/slow-uu" ] && sleep "$(cat "$P2S_STUB/slow-uu")" ;; *) when=pre ;; esac
+if [ "$(cat "$P2S_STUB/close-in-uu" 2>/dev/null)" = "$when" ]; then
+  r=$(cat "$P2S_STUB/reader.pid")
+  kill "$r"
+  for _ in $(seq 50); do kill -0 "$r" 2>/dev/null || break; sleep 0.1; done
+fi
 up=()
 while read -r o p; do
   case ", $allowed," in *", o=$o,"* | *", origin=$o,"*) up+=("$p") ;; esac
@@ -1478,8 +1497,8 @@ AK=$(bash "$S/run.sh" autoupdate web-y); code=$?
 has "$AK" "kind=pin host=web-y branch=8.3 file=$PIN83 action=written" "web-y with a leftover temp pin: the pin is written, not taken as present"
 eq "$(ls "$(y /etc/apt/preferences.d)")" "php2shell-php8.3.pref" "web-y with a leftover temp pin: the temp file replaced"
 
-# The connection drops while the dry run judges the new origin entry: like sshd, the ssh stub sends the session
-# SIGHUP and then SIGKILL. The keeper puts the entry back as it was before it goes, so no unchecked entry stays.
+# The session is killed while the dry run judges the new origin entry: the ssh stub sends it SIGHUP and then
+# SIGKILL. The keeper puts the entry back as it was before it goes, so no unchecked entry stays.
 for prev in no old; do
   yreset
   if [ "$prev" = old ]; then mkdir -p "$(y /etc/apt/apt.conf.d)"; printf '%s\n' "$OLDUU" >"$(y $UUC)"; fi
@@ -1497,6 +1516,41 @@ for prev in no old; do
       || ok "web-y drop during the dry run (no entry before): the entry is removed again"
   fi
 done
+
+# The same drop as it comes without a pty: no signal, the session's reader is gone. The client leaves during the
+# first dry run, so the program writes the entry and then meets SIGPIPE on the record right after it, inside
+# the unchecked window. The entry is put back; the record of it went nowhere.
+for prev in no old; do
+  yreset
+  if [ "$prev" = old ]; then mkdir -p "$(y /etc/apt/apt.conf.d)"; printf '%s\n' "$OLDUU" >"$(y $UUC)"; fi
+  echo pre >"$WORK/hosts/web-y/close-in-uu"
+  : >"$STUB_LOG"
+  AP=$(bash "$S/run.sh" autoupdate web-y 2>&1); code=$?
+  eq "$code" 255 "web-y session gone without a signal ($prev entry before): connection lost"
+  eq "$(grep -c '^unattended-upgrade ' "$STUB_LOG")" 1 "web-y session gone without a signal ($prev entry before): stopped before the second dry run"
+  if [ "$prev" = old ]; then
+    eq "$(cat "$(y $UUC)" 2>/dev/null)" "$OLDUU" "web-y session gone without a signal (old entry before): the old entry is back"
+  else
+    [ -e "$(y $UUC)" ] && bad "web-y session gone without a signal (no entry before): the entry is removed again" "$AP" \
+      || ok "web-y session gone without a signal (no entry before): the entry is removed again"
+  fi
+done
+# The client leaves during the second dry run: its verdict is in before the next write, so the program carries
+# on with the session gone and acts on it. One that takes a distro branch from the PPA has its entry taken out;
+# an accepted one stays, checked.
+yreset
+printf '%s\n' 'Ubuntu php8.3-common' 'LP-PPA-ondrej-php php8.3-fpm' >"$WORK/hosts/web-y/uu-upgrades.txt"
+echo post >"$WORK/hosts/web-y/close-in-uu"
+AQ=$(bash "$S/run.sh" autoupdate web-y 2>&1); code=$?
+eq "$code" 255 "web-y session gone during a failing dry run: connection lost"
+[ -e "$(y $UUC)" ] && bad "web-y session gone during a failing dry run: the entry is taken out" "$AQ" \
+  || ok "web-y session gone during a failing dry run: the entry is taken out"
+yreset
+echo post >"$WORK/hosts/web-y/close-in-uu"
+AQ=$(bash "$S/run.sh" autoupdate web-y 2>&1); code=$?
+eq "$code" 255 "web-y session gone during a passing dry run: connection lost"
+[ -f "$(y $UUC)" ] && ok "web-y session gone during a passing dry run: the checked entry stays" \
+  || bad "web-y session gone during a passing dry run: the checked entry stays" "$AQ"
 
 # The dry run fails: the origin entry it was asked to accept is taken out again, the pin stays.
 yreset
