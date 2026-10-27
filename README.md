@@ -109,3 +109,11 @@ bash tests/run.sh
 ```
 
 The tests touch no real server: `ssh`, `dpkg-query`, `systemctl` and the apt tools are replaced with stubs, and every host is a fake directory tree.
+
+CI runs on every push and pull request: shellcheck 0.11.0 on every script, a syntax check of each mode's bundle (what ssh would receive), then the tests. To run shellcheck locally the same way:
+
+```
+shellcheck -x -S warning scripts/*.sh scripts/lib/*.sh tests/run.sh
+```
+
+The libraries have no shebang, because they are joined into one stream before they reach a server, so each starts with `# shellcheck shell=bash`.
