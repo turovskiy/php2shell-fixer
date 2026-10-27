@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The next step per host, read from the newest saved log of each mode, so an interrupted session resumes
 # where it stopped. Steps: audit, fix, ensure, autoupdate, verify (audit again after a write), manual (a branch
-# whose release gets no free fix: only the operator can close it), done.
+# whose release gets no free fix, or PHP outside dpkg: only the operator can close it), done.
 # Usage: next.sh --latest       every run.sh log in ${P2S_CACHE:-$XDG_CACHE_HOME/php2shell}
 #        next.sh <log>...
 # Prints one "<host>: <step> - <reason>" line per host. Exit 0; 2 on bad usage or no logs.
@@ -21,6 +21,23 @@ newest=$(p2s_newest_logs "${logs[@]}")
 [ -n "$newest" ] || { echo "no readable logs" >&2; exit 2; }
 
 word() { sed -nE "s/.*(^| )$1=([^ ]*).*/\\2/p" <<<"$2"; }   # word <key> <summary>
+# Who updates each PHP of a foreign word (cpanel:/opt/cpanel/ea-php83/root/usr/sbin/php-fpm,...), "; "-joined.
+foreign_text() {
+  local e es out=""
+  IFS=, read -ra es <<<"$1"
+  for e in "${es[@]}"; do
+    [ -z "$out" ] || out+="; "
+    out+="${e#*:}: "
+    case ${e%%:*} in
+      cpanel) out+="cPanel's ea-php packages, updated through EasyApache 4 or the system package manager" ;;
+      plesk) out+="Plesk's PHP handler, updated through the Plesk installer" ;;
+      litespeed) out+="LiteSpeed's lsphp packages, from its repository" ;;
+      local) out+="a local build: rebuild it from a fixed PHP release" ;;
+      *) out+="not from dpkg; find who installed it and how it is updated" ;;
+    esac
+  done
+  echo "$out"
+}
 # What closes each branch of a nofix word (8.3:fix-only-in-esm,7.4/apache2:no-fix-for-release), "; "-joined.
 nofix_text() {
   local e es out=""
@@ -83,6 +100,9 @@ for target in $(cut -f1 <<<"$newest" | sort -u); do
       [ "$(word apache_overrides "$a")" = - ] || reason+=", Apache override: $(word apache_overrides "$a") (the operator removes it)"
     elif [ "$(word hook "$a")" = missing ] || [ "$(word hook "$a")" = outdated ]; then
       step=ensure reason="mitigated, but the apt hook that keeps it in place is $(word hook "$a")"
+    elif [ "$(word foreign "$a")" != - ]; then
+      step=manual reason="PHP outside dpkg, which this plugin neither judges nor patches: $(foreign_text "$(word foreign "$a")")"
+      [ "$(word nofix "$a")" = - ] || reason+="; no free fix: $(nofix_text "$(word nofix "$a")")"
     elif [ "$(word nofix "$a")" != - ]; then
       step=manual reason="mitigated, but no patch can close it here: $(nofix_text "$(word nofix "$a")")"
     elif [ "$(word ppa "$a")" = yes ] && [ "$(word ppa_covered "$a")" = no ]; then

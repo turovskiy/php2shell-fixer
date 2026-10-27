@@ -29,7 +29,7 @@ usage() {
 bundle() {
   case $1 in
     audit) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/mitigation.sh" "$HERE/lib/hostfacts.sh" "$HERE/lib/branch.sh" "$HERE/audit.sh" ;;
-    ensure) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/mitigation.sh" "$HERE/ensure.sh" ;;
+    ensure) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/mitigation.sh" "$HERE/lib/hostfacts.sh" "$HERE/ensure.sh" ;;
     fix) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/mitigation.sh" "$HERE/lib/hostfacts.sh" "$HERE/lib/branch.sh" "$HERE/fix.sh" ;;
     autoupdate) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/hostfacts.sh" "$HERE/lib/pins.sh" "$HERE/autoupdate.sh" ;;
     *) echo "unknown mode: $1" >&2; return 2 ;;
