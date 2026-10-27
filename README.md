@@ -50,7 +50,7 @@ bash scripts/report.sh --latest   # the newest log per server, one report
 bash scripts/next.sh --latest     # what to do next on each server: audit, fix, ensure, autoupdate, verify or done
 ```
 
-Write commands (`ensure`, `autoupdate`) are never cut off by a time limit, even if a server is slow: a session killed in the middle of apt or a reload leaves the server half changed. Only the read-only audit has a limit (10 minutes per server by default). A dropped connection is another matter: if your laptop sleeps or the network goes, the server most likely stops the command where it was. For `ensure` that is harmless (run it again), but keep the connection up until it finishes.
+Write commands (`ensure`, `autoupdate`) are never cut off by a time limit, even if a server is slow: a session killed in the middle of apt or a reload leaves the server half changed. Only the read-only audit has a limit (10 minutes per server by default). A dropped connection is another matter. If your laptop sleeps or the network goes, the server does not stop the command at once: it stops the next time the command prints something, or lets it run to the end if it prints little. So you cannot tell where it stopped. For `ensure` that is harmless (run it again), but keep the connection up until it finishes.
 
 ## Patch a server
 
@@ -96,7 +96,7 @@ Then it does three things, in this order:
 
 1. For every PHP version installed from Ubuntu or Debian that the PPA also ships, it writes a pin that keeps the PPA builds away from it: `/etc/apt/preferences.d/php2shell-php8.3.pref` with `Pin-Priority: -1`. The `.pref` ending matters. apt reads only files in that folder with no extension or with `.pref`, and `php8.3` alone already counts as having one (`.3`).
 2. It asks apt (`apt-cache policy`) which build it would now install for every PHP package, and where each build comes from, by the source apt lists for it rather than by the version number. If any package would switch between Ubuntu or Debian and the PPA, or a pinned PHP version still has a PPA build apt does not hold off (a pin that does nothing, even while the PPA build happens to be older), the command stops, names the PHP version and the pin that does not work, and goes no further. The pins it wrote stay: they only keep each version where it is.
-3. It adds the PPA to the list unattended-upgrades accepts (`/etc/apt/apt.conf.d/51php2shell-ppa-origins`) and runs `unattended-upgrade --dry-run` to check the PPA shows up and that unattended-upgrades would not now upgrade an Ubuntu or Debian PHP package from the PPA. If either check fails, that file is taken out again. If your connection drops before the check is done, the file is put back as it was.
+3. It adds the PPA to the list unattended-upgrades accepts (`/etc/apt/apt.conf.d/51php2shell-ppa-origins`) and runs `unattended-upgrade --dry-run` to check the PPA shows up and that unattended-upgrades would not now upgrade an Ubuntu or Debian PHP package from the PPA. If either check fails, that file is taken out again. If your connection drops right after the file is written, the file is put back as it was. If it drops while the check runs, the server finishes the check anyway and keeps or removes the file by its result. Either way, run the same command again to see where the server stands.
 
 If a server already has an equivalent pin or PPA entry, under any file name, the command finds it by content and writes nothing twice. A pin under a name apt skips (for example `ondrej-php.conf`) shows up in step 2, and the command tells you what to rename it to. On a server without the PPA it writes nothing. Every run ends with the commands that undo what it wrote; a file it had to overwrite is kept first in `/var/lib/php2shell/backup`, and the undo command copies it back.
 
@@ -109,3 +109,11 @@ bash tests/run.sh
 ```
 
 The tests touch no real server: `ssh`, `dpkg-query`, `systemctl` and the apt tools are replaced with stubs, and every host is a fake directory tree.
+
+CI runs on every push and pull request: shellcheck 0.11.0 on every script, a syntax check of each mode's bundle (what ssh would receive), then the tests. To run shellcheck locally the same way:
+
+```
+shellcheck -x -S warning scripts/*.sh scripts/lib/*.sh tests/run.sh
+```
+
+The libraries have no shebang, because they are joined into one stream before they reach a server, so each starts with `# shellcheck shell=bash`.

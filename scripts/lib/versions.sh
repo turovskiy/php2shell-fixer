@@ -1,3 +1,5 @@
+# shellcheck shell=bash
+# shellcheck disable=SC2034  # data only: the files after this one in every bundle read the tables
 # Fixed-build thresholds for CVE-2026-109618 and CVE-2026-109619. Data only: the verdict rules live in p2s.sh.
 # A branch with no threshold here is judged by its package changelog.
 

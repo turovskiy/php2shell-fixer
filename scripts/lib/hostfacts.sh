@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Host facts that decide how to patch: which site runs on which FPM pool (and which sites Apache serves),
 # whether FPM restarted after the last PHP install, held packages, the ondrej/sury sources and their Release
 # info, unattended-upgrades. Read-only. Sourced after p2s.sh; used by audit.sh, fix.sh and autoupdate.sh.

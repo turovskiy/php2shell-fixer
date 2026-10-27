@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared library: root prefix, record format, verdict. Sourced after versions.sh, both locally and in the
 # bundle that run.sh streams to a host.
 

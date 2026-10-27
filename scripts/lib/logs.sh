@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Saved run logs (run.sh), read locally by report.sh and next.sh: which host and mode a log belongs to,
 # the newest log per host and mode, and what a log found.
 
