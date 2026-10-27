@@ -47,8 +47,10 @@ Two commands read those logs later:
 
 ```
 bash scripts/report.sh --latest   # the newest log per server, one report
-bash scripts/next.sh --latest     # what to do next on each server: audit, fix, ensure, autoupdate, verify, manual or done
+bash scripts/next.sh --latest     # what to do next on each server: audit, investigate, fix, ensure, autoupdate, verify, manual or done
 ```
+
+The audit also checks for signs that a server was already attacked, since exploitation began on 2026-10-17 (before the fixed builds came out): PHP or Apache crashes in the logs, a shell or a download tool started by PHP that is running right now, and PHP files changed since that day in the site folders and in `/tmp`, `/var/tmp` and `/dev/shm`. Each check has a time limit and a file limit. The report lists what it found under "Indicators of compromise", and `next.sh` says `investigate` before anything else when a shell runs under PHP, or when crashes and new PHP files show up together. If that happens, patching is not enough: the server may already hold a web shell or have leaked its secrets, so isolate it, rebuild it, and change every password and key the sites used. A clean result is not proof either: file dates can be faked and old logs get deleted.
 
 The audit also looks for PHP that did not come from Ubuntu or Debian packages: cPanel's `ea-php`, Plesk's PHP, LiteSpeed's `lsphp`, or a build in `/usr/local`. It finds the running ones through `/proc` and the installed ones in those vendors' usual folders. The plugin cannot judge or patch such a PHP: the vendor updates it, and its version number says little, because vendors backport fixes. So the report lists them, `fix` and `ensure` leave them alone and say so, and `next.sh` gives such a server `manual` instead of `done`, naming who updates each one.
 
