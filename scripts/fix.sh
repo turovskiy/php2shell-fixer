@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # PHP2Shell patch for PHP-FPM and mod_php hosts. Two parts in one program:
 # - the launcher (the tail of this file) runs in the ssh session: it starts the worker as a transient systemd
 #   unit, or attaches to a run still going, or hands back a finished run's log, and follows that log;
@@ -189,7 +190,7 @@ p2s_fix_worker() {
       if [ -z "$state" ] && [ "$changed" = yes ]; then
         systemctl restart "$unit" </dev/null
         if [ "$(systemctl is-active "$unit" </dev/null 2>/dev/null)" = active ]; then
-          restart=done
+          restart='done'
         else
           restart=failed state=$([ "$sapi" = fpm ] && echo pool-down || echo apache-down)
           echo "$unit is DOWN after its restart:"

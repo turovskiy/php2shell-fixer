@@ -619,9 +619,9 @@ eq "$(REL=26.10 vd 8.5 8.5.9-0ubuntu2 no)" "unfixed below-threshold" \
   "Ubuntu 26.10 8.5.9-0ubuntu2 unfixed, though above 26.04's fixed 8.5.4-0ubuntu1.5"
 eq "$(REL=26.10 vd 8.5 8.5.9-0ubuntu2.1 no)" "fixed distro-threshold" "Ubuntu 26.10 8.5 2.1 fixed"
 eq "$(REL=22.04 vd 8.3 8.3.6-0ubuntu0.24.04.13 no)" "unfixed below-threshold" "24.04's 8.3 threshold does not apply on 22.04"
-eq "$(P2S_ROOT=$WORK/no-such-root P2S_RELEASE= p2s_verdict 8.3 8.3.6-0ubuntu0.24.04.13 distro no)" "unfixed below-threshold" \
+eq "$(P2S_ROOT=$WORK/no-such-root P2S_RELEASE='' p2s_verdict 8.3 8.3.6-0ubuntu0.24.04.13 distro no)" "unfixed below-threshold" \
   "no os-release: no distro threshold"
-eq "$(P2S_ROOT=$WORK/hosts/web-e/root P2S_RELEASE= p2s_release) $(P2S_ROOT=$WORK/hosts/web-c/root P2S_RELEASE= p2s_release)" "22.04 12" \
+eq "$(P2S_ROOT=$WORK/hosts/web-e/root P2S_RELEASE='' p2s_release) $(P2S_ROOT=$WORK/hosts/web-c/root P2S_RELEASE='' p2s_release)" "22.04 12" \
   "release from the host's os-release"
 eq "$(vd 8.0 1:8.0.30-9+ubuntu24.04.1+deb.sury.org+1 missing)" "unfixed no-cve-in-changelog" "missing changelog is not a fix"
 eq "$(p2s_origin 8.3.6-0ubuntu0.24.04.13) $(p2s_origin 1:7.4.33-31+ubuntu24.04.1+deb.sury.org+1) $(p2s_origin 8.2.29-1~deb12u1) $(p2s_origin 8.3.36-1)" \
@@ -1111,7 +1111,7 @@ eq "$code" 3 "web-t: HTTP status changed -> exit 3"
 has "$Tt" "shop.example.com: 200 -> 502" "web-t: names the site"
 has "$Tt" "kind=probe_summary host=web-t state=changed" "web-t: recorded"
 
-S1=$(bash "$S/run.sh" fix web-s 2>&1); code=$?
+bash "$S/run.sh" fix web-s >/dev/null 2>&1; code=$?
 eq "$code" 255 "web-s: connection dropped mid-upgrade"
 for i in $(seq 1 60); do ls "$(state web-s)"/*.exit >/dev/null 2>&1 && break; sleep 0.25; done
 eq "$(cat "$(state web-s)"/*.exit 2>/dev/null)" 0 "web-s: the unit ran to its end after the drop"
@@ -1122,7 +1122,7 @@ has "$S2" "finished while nobody was watching; its log follows. No new patch was
 has "$S2" "state=fixed" "web-s: the log shows the fix"
 eq "$(ls "$WORK/hosts/web-s/units/" | wc -l)" 1 "web-s: one patch unit only"
 
-U1=$(bash "$S/run.sh" fix web-u 2>&1); code=$?
+bash "$S/run.sh" fix web-u >/dev/null 2>&1; code=$?
 eq "$code" 255 "web-u: connection dropped mid-upgrade"
 rm "$WORK/hosts/web-u/drop-after"
 U2=$(bash "$S/run.sh" fix web-u); code=$?
