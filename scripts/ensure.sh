@@ -5,9 +5,9 @@
 # Installs an apt hook that runs the same ensure after every dpkg run, so PHP branches installed later get it
 # too. Idempotent.
 # Runs as the tail of the bundle from run.sh (after versions.sh, p2s.sh, mitigation.sh): run.sh ensure <host>
-# Exit: 0 every web SAPI mitigated; 3 a pool or Apache override re-enables it, a foreign 99-security.ini, a
-#       SAPI still On or unknown, or the apt hook could not be written; 1 not root, a config test failed
-#       (change rolled back) or a reload failed.
+# Exit: 0 every web SAPI mitigated; 3 an override re-enables it (pool, Apache, nginx PHP_VALUE, .user.ini), a
+#       foreign 99-security.ini, a SAPI still On or unknown, or the apt hook could not be written; 1 not root,
+#       a config test failed (change rolled back) or a reload failed.
 set -u
 export LC_ALL=C
 

@@ -303,7 +303,11 @@ while IFS=$'\t' read -r _ _ _ log; do
         ;;
       override)
         if [ "${r[sapi]:-}" = apache2 ]; then o="- php${r[branch]} Apache: "; else o="- php${r[branch]} pool \`${r[pool]}\`: "; fi
-        o+="\`${r[file]}:${r[line]}\` ${r[directive]} = ${r[value]}"
+        if [ "${r[directive]}" = user_ini_scan ]; then
+          o+=".user.ini scan of \`${r[file]}\` stopped at its file cap: **files beyond it were not read**"
+        else
+          o+="\`${r[file]}:${r[line]}\` ${r[directive]} = ${r[value]}"
+        fi
         [ "${r[enables]}" = yes ] && o+=" - **re-enables it**"
         overrides+=("$o")
         ;;

@@ -2,6 +2,8 @@
 # Host facts that decide how to patch: which site runs on which FPM pool (and which sites Apache serves),
 # whether FPM restarted after the last PHP install, held packages, the ondrej/sury sources and their Release
 # info, unattended-upgrades. Read-only. Sourced after p2s.sh; used by audit.sh, fix.sh and autoupdate.sh.
+# The pool helpers (p2s_fpm_pools, p2s_listen_matches) live in mitigation.sh: ensure and the apt hook, which
+# carry no hostfacts.sh, need them for nginx's per-request overrides.
 
 # Sites from "nginx -T" output (effective config: symlinked and included files count). Prints one
 # "names|pass" line per fastcgi_pass in a server block, names comma-joined ("-" without server_name).
@@ -61,42 +63,6 @@ p2s_apache_sites() { # $1 apachectl -S output
     $1 == "default" && $2 == "server" { print $3 "|" port "|" addr; next }
     $1 == "alias" { print $2 "|" port "|" addr; next }
     $1 ~ /:[0-9]+$/ && $3 ~ /^\(/ { at($1); print $2 "|" port "|" addr }' <<<"$1" | sort -u
-}
-
-# Do an FPM listen address and an nginx fastcgi_pass point at the same socket?
-# Unix sockets compare by path (/var/run is /run); TCP by port when either side is loopback or any.
-p2s_listen_matches() { # $1 pool listen, $2 fastcgi_pass
-  local l=${1#unix:} p=${2#unix:}
-  l=${l/#\/var\/run\//\/run\/}
-  p=${p/#\/var\/run\//\/run\/}
-  if [[ $l == /* || $p == /* ]]; then
-    [ "$l" = "$p" ]
-    return
-  fi
-  local lh lp ph pp
-  if [[ $l == *:* ]]; then lh=${l%:*} lp=${l##*:}; else lh="" lp=$l; fi
-  ph=${p%:*} pp=${p##*:}
-  [ "$lp" = "$pp" ] || return 1
-  [ "$lh" = "$ph" ] && return 0
-  case $lh in '' | '*' | 0.0.0.0 | '[::]') return 0 ;; esac   # pool listens on every address
-  case "$lh $ph" in
-    127.0.0.1\ 127.0.0.1 | 127.0.0.1\ localhost | localhost\ 127.0.0.1 | '[::1] [::1]' | '[::1] localhost' | 'localhost [::1]') return 0 ;;
-  esac
-  return 1
-}
-
-# FPM pools of a branch, one "pool|listen" per line, from php-fpm.conf and pool.d/*.conf.
-p2s_fpm_pools() { # $1 branch
-  local f
-  for f in "$(p2s_path "/etc/php/$1/fpm/php-fpm.conf")" "$(p2s_path "/etc/php/$1/fpm/pool.d")"/*.conf; do
-    [ -f "$f" ] || continue
-    awk '
-      /^[[:space:]]*\[[^]]+\][[:space:]]*$/ { pool = $0; gsub(/[][[:space:]]/, "", pool); next }
-      pool != "" && pool != "global" && /^[[:space:]]*listen[[:space:]]*=/ {
-        v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]*(;.*)?$/, "", v); gsub(/"/, "", v)
-        print pool "|" v
-      }' "$f"
-  done
 }
 
 # Enabled apt sources of the ondrej/sury PPA, one "file|uri|suite" per line (one-line and deb822 format).

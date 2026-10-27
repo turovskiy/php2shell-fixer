@@ -60,17 +60,19 @@ The audit's last section tells the operator how to patch; report these alongside
 
 ## Mitigation states
 
-`session.upload_progress.enabled = 0` closes CVE-2026-115560 and the session path of CVE-2026-109619, whether or not a fixed build exists. It only counts when set before the request is parsed (php.ini, `conf.d`, pool config); `ini_set()` and `.user.ini` come too late.
+`session.upload_progress.enabled = 0` closes CVE-2026-115560 and the session path of CVE-2026-109619, whether or not a fixed build exists. Whatever is applied before PHP parses the request body decides: php.ini, `conf.d`, the pool config, and also nginx's `fastcgi_param PHP_VALUE`/`PHP_ADMIN_VALUE` and a `.user.ini` under the site's root, both of which can turn it back on per request (`.user.ini` verified on PHP-FPM 8.3.36 and 8.5.12, #31). Only `ini_set()` comes too late.
 
 | State | Meaning |
 |---|---|
 | `mitigated` | The SAPI reports Off and no pool re-enables it |
-| `override` | A pool `php_value`/`php_admin_value`/`php_flag`/`php_admin_flag`, or the same directive in Apache config for mod_php, turns it back on; the SAPI's `-i` cannot see this, the pool and Apache scans do |
+| `override` | Something applied per pool or per request turns it back on, and the SAPI's `-i` cannot see it: a pool `php_value`/`php_admin_value`/`php_flag`/`php_admin_flag`, the same directive in Apache config for mod_php, nginx `fastcgi_param PHP_VALUE`/`PHP_ADMIN_VALUE` (`directive=PHP_VALUE`), or a `.user.ini` (`directive=user_ini`) |
 | `foreign` | A 99-security.ini without the plugin marker or the legacy fix.sh comment; ensure leaves it alone |
 | `not-mitigated` | The SAPI reports On |
 | `unknown` | The SAPI binary gave no answer |
 
 The Apache scan reads every file Apache's own include dump lists (`apachectl -t -D DUMP_INCLUDES`, so a custom `Include` counts); when the dump fails, `apache2.conf` and the `*.conf` files in `mods-enabled`, `conf-enabled` and `sites-enabled`. `.htaccess` files are not scanned, so a mod_php host with `AllowOverride` set can still re-enable upload progress per directory: say so when reporting such a host as mitigated.
+
+For FPM, the scan also reads `nginx -T`: each `fastcgi_param PHP_VALUE`/`PHP_ADMIN_VALUE` that sets upload progress, with file and line from the dump, counted for the pool its server block's `fastcgi_pass` reaches (`pool=-` when it reaches no pool or sits outside any server block, as an included snippet does: then it counts for every FPM branch). It then searches each such server's `root` for `.user.ini` files (`user_ini.filename`), 4 levels deep and at most 200 files per root; `directive=user_ini_scan value=capped` means the cap was hit and deeper files went unread: say so. Neither nginx nor `.user.ini` files are edited; the operator fixes them, like pool overrides.
 
 `ini=legacy` is a file written by the earlier fix.sh; ensure adopts it unchanged when it already turns upload progress off.
 
