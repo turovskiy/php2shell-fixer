@@ -28,7 +28,7 @@ for log in "${logs[@]}"; do
   [ -r "$log" ] || { echo "unreadable log: $log" >&2; rc=1; }
 done
 branches=() mitigations=() overrides=() sites=() pools=() holds=() sources=() origins=() facts=() patches=() probes=()
-keeps=() klines=()
+keeps=() klines=() gaps=()
 dec() { local v=${1//%20/ }; echo "${v//%25/%}"; }   # values were encoded with p2s_enc
 flush() { # print the current host section
   [ -n "${cur_host:-}" ] || return 0
@@ -37,6 +37,10 @@ flush() { # print the current host section
     echo '| Branch | SAPI | Installed | Origin | Service | Restart | CVEs in changelog | Verdict | Reason | Target | apt lists |'
     echo '|---|---|---|---|---|---|---|---|---|---|---|'
     printf '%s\n' "${branches[@]}"
+  fi
+  if [ ${#gaps[@]} -gt 0 ]; then
+    echo
+    printf '%s\n' "${gaps[@]}"
   fi
   if [ ${#mitigations[@]} -gt 0 ]; then
     [ ${#branches[@]} -eq 0 ] || echo
@@ -100,14 +104,14 @@ flush() { # print the current host section
     printf '\nunattended-upgrades origins: %s\n' "${origins[*]}"
   fi
   branches=() mitigations=() overrides=() sites=() pools=() holds=() sources=() origins=() facts=() patches=() probes=()
-  keeps=() klines=()
+  keeps=() klines=() gaps=()
 }
 
 echo "# PHP2Shell report"
 while IFS=$'\t' read -r _ _ _ log; do
   [ -n "$log" ] || continue
   hosts=0
-  cur_host="" run_mode="" run_started="" run_status="" run_target="" mode_seen=""
+  cur_host="" cur_os="" run_mode="" run_started="" run_status="" run_target="" mode_seen=""
   while IFS= read -r line; do
     [[ $line == '@p2s '* ]] || continue
     declare -A r=()
@@ -127,7 +131,7 @@ while IFS=$'\t' read -r _ _ _ log; do
         ;;
       host)
         flush
-        cur_host=${r[host]}
+        cur_host=${r[host]} cur_os=${r[os]}
         hosts=$((hosts + 1))
         printf '\n## %s (%s)\n\nLog: `%s`\n\n' "${r[host]}" "${r[os]}" "$(basename "$log")"
         ;;
@@ -144,6 +148,15 @@ while IFS=$'\t' read -r _ _ _ log; do
           '') lists=- ;;
           yes) lists="**${r[lists_updated]%%T*}, older than the fixes**" ;;
           *) lists=${r[lists_updated]%%T*} ;;
+        esac
+        # No fix exists for the release: fresher lists would not help, so their age is no warning here.
+        case ${r[target_reason]:-} in
+          no-fix-for-release)
+            lists=${r[lists_updated]%%T*}
+            gaps+=("- **php${r[branch]} ${r[sapi]}: $cur_os ships no fix**; \`apt-get update\` will not bring one. Options: Debian ELTS or TuxCare, the sury build of the branch, or a move to a supported release or branch. Meanwhile upload progress stays off.") ;;
+          fix-only-in-esm)
+            lists=${r[lists_updated]%%T*}
+            gaps+=("- **php${r[branch]} ${r[sapi]}: $cur_os gets the fix only from Ubuntu Pro ESM** (USN-8948-2), and no ESM source is enabled. Attach Ubuntu Pro (\`pro attach\`, ESM Infra; the Legacy add-on on 16.04 and 14.04), then audit again.") ;;
         esac
         # Logs written before the restart check carry no restart field.
         case ${r[restart]:-} in
