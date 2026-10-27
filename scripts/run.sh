@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Local runner. Streams a mode's scripts to each host as one bash program over ssh, so nothing is copied
 # to a server, and saves each host's output to its own log that report.sh and next.sh read.
-# Usage: run.sh audit|ensure|fix|autoupdate <host>... host: an ssh alias or user@address; audit only reads,
+# Usage: run.sh audit|ensure|fix|autoupdate|harden <host>... host: an ssh alias or user@address; audit only reads,
 #        the others write
 #        run.sh bundle <mode>                        print the stream for <mode> (what ssh would receive)
 # Logs:  ${P2S_CACHE:-$XDG_CACHE_HOME/php2shell}/<host>-<mode>-<UTC stamp with ms>.log, opened by a "run"
@@ -28,9 +28,12 @@ usage() {
 
 bundle() {
   case $1 in
-    audit) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/mitigation.sh" "$HERE/lib/hostfacts.sh" "$HERE/lib/ioc.sh" "$HERE/lib/branch.sh" "$HERE/audit.sh" ;;
+    audit) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/mitigation.sh" "$HERE/lib/hostfacts.sh" "$HERE/lib/ioc.sh" "$HERE/lib/harden.sh" "$HERE/lib/branch.sh" "$HERE/audit.sh" ;;
     ensure) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/mitigation.sh" "$HERE/lib/hostfacts.sh" "$HERE/ensure.sh" ;;
     fix) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/mitigation.sh" "$HERE/lib/hostfacts.sh" "$HERE/lib/branch.sh" "$HERE/fix.sh" ;;
+    # The operator's MemoryMax (P2S_MEMORY_MAX, checked below) travels in the stream: ssh passes no environment.
+    harden) [ -z "${P2S_MEMORY_MAX:-}" ] || printf 'P2S_MEMORY_MAX=%q\n' "$P2S_MEMORY_MAX"
+      cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/mitigation.sh" "$HERE/lib/hostfacts.sh" "$HERE/lib/branch.sh" "$HERE/lib/pins.sh" "$HERE/lib/harden.sh" "$HERE/harden.sh" ;;
     autoupdate) cat "$HERE/lib/versions.sh" "$HERE/lib/p2s.sh" "$HERE/lib/hostfacts.sh" "$HERE/lib/pins.sh" "$HERE/autoupdate.sh" ;;
     *) echo "unknown mode: $1" >&2; return 2 ;;
   esac
@@ -69,8 +72,12 @@ case ${1:-} in
     [ $# -eq 2 ] || usage
     bundle "$2"
     ;;
-  audit | ensure | fix | autoupdate)
+  audit | ensure | fix | autoupdate | harden)
     [ $# -ge 2 ] || usage
+    if [ -n "${P2S_MEMORY_MAX:-}" ] && ! [[ $P2S_MEMORY_MAX =~ ^[0-9]+(%|[KMGT])?$ ]]; then
+      echo "P2S_MEMORY_MAX must be a percentage (75%) or a size (4G), not: $P2S_MEMORY_MAX" >&2
+      exit 2
+    fi
     mode=$1
     shift
     mkdir -p "$CACHE"
