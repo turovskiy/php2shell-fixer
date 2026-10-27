@@ -3,15 +3,15 @@
 #   unit, or attaches to a run still going, or hands back a finished run's log, and follows that log;
 # - the worker (p2s_fix_worker) is the patch itself, detached from ssh, so a dropped connection never
 #   stops apt halfway.
-# Per branch, one pinned install covers every SAPI; then each running SAPI gets its mitigation, its config
-# test (php-fpm -t for a pool, apachectl configtest for mod_php) and a restart of its service (the pool, or
-# apache2), and one "fix" record.
+# Per branch, one pinned install covers every SAPI, with maintainer scripts barred from touching services
+# (policy-rc.d); then each running SAPI gets its mitigation, its config test (php-fpm -t for a pool,
+# apachectl configtest for mod_php) and a restart of its service (the pool, or apache2), and one "fix" record.
 # Runs as the tail of the bundle from run.sh (after versions.sh, p2s.sh, mitigation.sh, hostfacts.sh,
 # branch.sh): run.sh fix <host>
 # Server state: /var/lib/php2shell/fix-<stamp>.{log,exit,worker.sh,reported} and "current" (the last run).
 # Exit (the worker's, passed on): 0 every running branch fixed and HTTP unchanged; 3 a branch still unfixed
-#   (mitigation applied) or an HTTP status changed; 1 preflight failed, apt failed, a config test failed or a
-#   pool or Apache is down after its restart.
+#   (mitigation applied) or an HTTP status changed; 1 preflight failed, policy-rc.d could not be put in place
+#   or back, apt failed, a config test failed or a pool or Apache is down after its restart.
 set -u
 export LC_ALL=C
 
@@ -46,6 +46,39 @@ p2s_sapi_modules() { # $1 branch, $2 sapi
   esac
 }
 
+# Maintainer scripts start, stop and restart nothing while the worker installs: php-fpm's postinst would
+# restart the pool, and mod_php's would reload Apache, before the new ini is written and tested. invoke-rc.d
+# and deb-systemd-invoke ask /usr/sbin/policy-rc.d first, and its exit 101 means "not allowed". A host's own
+# policy-rc.d is moved to the state directory for the install and back after it. Ours carries a marker line,
+# so what a killed run (SIGKILL) left in place is put right in the next run's preflight.
+p2s_rcd_file() { p2s_path /usr/sbin/policy-rc.d; }
+p2s_rcd_mark() { echo '# php2shell-fixer: no service actions during the patch install; removed after it'; }
+# Take ours out and put the host's own back. Returns 1 when a kept one cannot go back (another policy-rc.d
+# took its place meanwhile, or the move failed): it stays in the state directory, and the output says so.
+p2s_rcd_restore() {
+  local f kept=$P2S_STATE/policy-rc.d.kept
+  f=$(p2s_rcd_file)
+  if grep -qxF "$(p2s_rcd_mark)" "$f" 2>/dev/null; then rm -f "$f"; fi
+  [ -e "$kept" ] || [ -L "$kept" ] || return 0
+  if [ ! -e "$f" ] && [ ! -L "$f" ] && mv "$kept" "$f"; then return 0; fi
+  echo "WARNING: the host's policy-rc.d is kept as $kept and is not back; put it back with:"
+  echo "  mv $kept /usr/sbin/policy-rc.d"
+  return 1
+}
+p2s_rcd_block() {
+  local f kept=$P2S_STATE/policy-rc.d.kept
+  f=$(p2s_rcd_file)
+  if [ -e "$kept" ] || [ -L "$kept" ]; then return 1; fi   # a kept one not yet back must not be overwritten
+  if [ -e "$f" ] || [ -L "$f" ]; then mv "$f" "$kept" || return 1; fi
+  if mkdir -p "${f%/*}" && printf '#!/bin/sh\n%s\nexit 101\n' "$(p2s_rcd_mark)" >"$f.php2shell-new" \
+    && chmod 755 "$f.php2shell-new" && mv "$f.php2shell-new" "$f"; then
+    return 0
+  fi
+  rm -f "$f.php2shell-new"
+  p2s_rcd_restore
+  return 1
+}
+
 # The patch. $1 run stamp. Returns 0, 1 or 3 as described at the top.
 p2s_fix_worker() {
   local stamp=$1 host held upd urc fields backup before_probe after_probe
@@ -59,6 +92,11 @@ p2s_fix_worker() {
   trap "rm -rf '$P2S_TMP'" RETURN
 
   echo "== preflight"
+  if ! p2s_rcd_restore; then
+    echo "STOP: a policy-rc.d kept by an earlier run is not back; nothing is installed until it is"
+    p2s_record kind=preflight host="$host" result=failed reason=policy-rc-d
+    return 1
+  fi
   held=$(apt-mark showhold </dev/null 2>/dev/null | grep -E '^(php|libapache2-mod-php)' | paste -sd, -)
   if [ -n "$held" ]; then
     echo "STOP: held PHP packages: $held. apt will not upgrade them; release them with apt-mark unhold first."
@@ -137,15 +175,26 @@ p2s_fix_worker() {
       echo "php$branch: $before is $BR_VERDICT; no install ($BR_TREASON)"
     else
       echo "php$branch: $before -> $BR_TARGET for: $pkgs"
-      # shellcheck disable=SC2046
-      if apt-get -o DPkg::Lock::Timeout=600 -o Acquire::Retries=5 -o Dpkg::Options::=--force-confold \
-        install -y -q --allow-downgrades $(for p in $pkgs; do printf '%s=%s ' "$p" "$BR_TARGET"; done) </dev/null; then
-        installed=yes
-        P2S_ROLLBACK+=("apt-get install --allow-downgrades $(for p in $pkgs; do printf '%s=%s ' "$p" "$before"; done)")
-      else
-        echo "apt-get install failed"
-        bstate=apt-failed
+      if ! p2s_rcd_block; then
+        echo "STOP: could not put policy-rc.d in place; php$branch not installed, so no maintainer script restarts it"
+        bstate=rcd-failed
         P2S_RC=1
+      else
+        # A stopped unit (SIGTERM) or a dying worker still takes ours out, and its temp directory.
+        trap 'p2s_rcd_restore; rm -rf "$P2S_TMP"' EXIT
+        trap 'exit 1' TERM INT HUP
+        # shellcheck disable=SC2046
+        if apt-get -o DPkg::Lock::Timeout=600 -o Acquire::Retries=5 -o Dpkg::Options::=--force-confold \
+          install -y -q --allow-downgrades $(for p in $pkgs; do printf '%s=%s ' "$p" "$BR_TARGET"; done) </dev/null; then
+          installed=yes
+          P2S_ROLLBACK+=("apt-get install --allow-downgrades $(for p in $pkgs; do printf '%s=%s ' "$p" "$before"; done)")
+        else
+          echo "apt-get install failed"
+          bstate=apt-failed
+          P2S_RC=1
+        fi
+        trap - EXIT TERM INT HUP
+        p2s_rcd_restore || P2S_RC=1
       fi
     fi
     after=$(dpkg-query -W -f='${Version}' "$ppkg" </dev/null 2>/dev/null)
