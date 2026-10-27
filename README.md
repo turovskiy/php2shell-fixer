@@ -47,8 +47,10 @@ Two commands read those logs later:
 
 ```
 bash scripts/report.sh --latest   # the newest log per server, one report
-bash scripts/next.sh --latest     # what to do next on each server: audit, fix, ensure, autoupdate, verify or done
+bash scripts/next.sh --latest     # what to do next on each server: audit, fix, ensure, autoupdate, verify, manual or done
 ```
+
+The audit also looks for PHP that did not come from Ubuntu or Debian packages: cPanel's `ea-php`, Plesk's PHP, LiteSpeed's `lsphp`, or a build in `/usr/local`. It finds the running ones through `/proc` and the installed ones in those vendors' usual folders. The plugin cannot judge or patch such a PHP: the vendor updates it, and its version number says little, because vendors backport fixes. So the report lists them, `fix` and `ensure` leave them alone and say so, and `next.sh` gives such a server `manual` instead of `done`, naming who updates each one.
 
 Write commands (`ensure`, `autoupdate`) are never cut off by a time limit, even if a server is slow: a session killed in the middle of apt or a reload leaves the server half changed. Only the read-only audit has a limit (10 minutes per server by default). A dropped connection is another matter. If your laptop sleeps or the network goes, the server does not stop the command at once: it stops the next time the command prints something, or lets it run to the end if it prints little. So you cannot tell where it stopped. For `ensure` that is harmless (run it again), but keep the connection up until it finishes.
 

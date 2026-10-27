@@ -322,6 +322,12 @@ p2s_fix_worker() {
   p2s_record kind=probe_summary host="$host" state="$pstate"
   if [ "$pstate" = changed ] && [ "$P2S_RC" = 0 ]; then P2S_RC=3; fi
 
+  # PHP outside dpkg (a control panel's, a source build) is the vendor's to update.
+  local fpath fsapi frun
+  while IFS='|' read -r fpath fsapi frun _; do
+    [ -n "$fpath" ] && echo "PHP outside dpkg left alone: $fpath ($fsapi, running $frun); its vendor updates it"
+  done <<<"$(p2s_foreign_php)"
+
   echo "== summary $host"
   echo "rollback:"
   echo "  tar xzf $backup -C /   # /etc/php as it was before this run, then restart the pools"

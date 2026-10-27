@@ -6,7 +6,8 @@
 # Output: a human-readable section plus "@p2s" records (schema in p2s.sh): one "branch" record per PHP-FPM
 # or mod_php (SAPI apache2) branch with its verdict and target, one "candidate" record per build apt offers
 # for it, and one "mitigation" record (plus "override" records) per web SAPI, then the host facts: web
-# servers, sites and pools, held packages, PPA sources with their Release info, unattended-upgrades.
+# servers, sites and pools, PHP outside dpkg ("foreign_php"), held packages, PPA sources with their Release
+# info, unattended-upgrades.
 set -u
 export LC_ALL=C
 
@@ -106,6 +107,15 @@ while IFS='|' read -r names pass; do
   p2s_record kind=vhost host="$host" names="$(p2s_enc "$names")" pass="$(p2s_enc "$pass")" branch="$mb" pool="$mp"
   echo "site $names -> $pass (php$mb pool $mp)"
 done <<<"$sites"
+
+# PHP outside dpkg (a control panel's, LiteSpeed's, a source build): this audit cannot judge it and fix and
+# ensure leave it alone, so it only gets named, with where it comes from.
+while IFS='|' read -r path fsapi running fver; do
+  [ -n "$path" ] || continue
+  src=$(p2s_foreign_source "$path")
+  p2s_record kind=foreign_php host="$host" path="$path" sapi="$fsapi" running="$running" version="$fver" source="$src"
+  echo "PHP outside dpkg: $path ($fsapi, $src, version $fver, running $running): not judged, not patched here"
+done <<<"$(p2s_foreign_php)"
 
 # Held PHP packages block a patch: apt will not upgrade them.
 while read -r held; do

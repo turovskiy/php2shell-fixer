@@ -28,7 +28,7 @@ for log in "${logs[@]}"; do
   [ -r "$log" ] || { echo "unreadable log: $log" >&2; rc=1; }
 done
 branches=() mitigations=() overrides=() sites=() pools=() holds=() sources=() origins=() facts=() patches=() probes=()
-keeps=() klines=() gaps=()
+keeps=() klines=() gaps=() foreigns=()
 dec() { local v=${1//%20/ }; echo "${v//%25/%}"; }   # values were encoded with p2s_enc
 flush() { # print the current host section
   [ -n "${cur_host:-}" ] || return 0
@@ -53,6 +53,12 @@ flush() { # print the current host section
     echo 'Pool and Apache overrides of `session.upload_progress.enabled`:'
     echo
     printf '%s\n' "${overrides[@]}"
+  fi
+  if [ ${#foreigns[@]} -gt 0 ]; then
+    [ ${#branches[@]} -eq 0 ] && [ ${#mitigations[@]} -eq 0 ] || echo
+    echo '**PHP outside dpkg**: not judged and not patched here; the vendor updates it (see next.sh).'
+    printf '\n| Path | SAPI | Source | Version | Running |\n|---|---|---|---|---|\n'
+    printf '%s\n' "${foreigns[@]}"
   fi
   if [ ${#patches[@]} -gt 0 ]; then
     [ ${#branches[@]} -eq 0 ] || echo
@@ -79,7 +85,8 @@ flush() { # print the current host section
   fi
   # A preflight stop leaves no branch rows, but the host has PHP: say nothing rather than "no PHP". A keeper
   # run is about apt, not about the SAPIs.
-  [ ${#branches[@]} -gt 0 ] || [ ${#mitigations[@]} -gt 0 ] || [ ${#patches[@]} -gt 0 ] || [ "$mode_seen" = fix ] \
+  [ ${#branches[@]} -gt 0 ] || [ ${#mitigations[@]} -gt 0 ] || [ ${#patches[@]} -gt 0 ] || [ ${#foreigns[@]} -gt 0 ] \
+    || [ "$mode_seen" = fix ] \
     || [ "$mode_seen" = autoupdate ] || echo 'No PHP-FPM, mod_php or PHP-CGI installed.'
   if [ ${#facts[@]} -gt 0 ]; then
     printf '\n### Host facts\n\n'
@@ -104,7 +111,7 @@ flush() { # print the current host section
     printf '\nunattended-upgrades origins: %s\n' "${origins[*]}"
   fi
   branches=() mitigations=() overrides=() sites=() pools=() holds=() sources=() origins=() facts=() patches=() probes=()
-  keeps=() klines=() gaps=()
+  keeps=() klines=() gaps=() foreigns=()
 }
 
 echo "# PHP2Shell report"
@@ -300,6 +307,9 @@ while IFS=$'\t' read -r _ _ _ log; do
           0 | unset) u+=" - **unattended-upgrades does not run** (APT::Periodic::Unattended-Upgrade ${r[periodic]})" ;;
         esac
         klines+=("- Auto-update keeper: $u")
+        ;;
+      foreign_php)
+        foreigns+=("$(printf '| `%s` | %s | %s | %s | %s |' "${r[path]}" "${r[sapi]}" "${r[source]}" "${r[version]}" "${r[running]}")")
         ;;
       override)
         if [ "${r[sapi]:-}" = apache2 ]; then o="- php${r[branch]} Apache: "; else o="- php${r[branch]} pool \`${r[pool]}\`: "; fi

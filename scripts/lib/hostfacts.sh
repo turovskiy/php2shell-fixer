@@ -148,3 +148,59 @@ p2s_enc() {
   local v=${1//%/%25}
   echo "${v// /%20}"
 }
+
+# Where a PHP outside dpkg comes from, by its path: cpanel | plesk | litespeed | local | unknown.
+p2s_foreign_source() { # $1 path
+  case $1 in
+    /opt/cpanel/*) echo cpanel ;;
+    /opt/plesk/*) echo plesk ;;
+    /usr/local/lsws/*) echo litespeed ;;
+    /usr/local/*) echo local ;;
+    *) echo unknown ;;
+  esac
+}
+
+# Is a file a dpkg package's? dpkg -S knows every file an installed package ships.
+p2s_dpkg_owned() { dpkg -S "$1" </dev/null >/dev/null 2>&1; }
+
+# PHP that no dpkg package owns, which neither the audit's verdicts nor fix and ensure can see: a control
+# panel's (cPanel ea-php, Plesk), LiteSpeed's lsphp, a source build. One "path|sapi|running|version" per line:
+# first the running SAPI processes (php-fpm*, php-cgi*, lsphp*, and a libphp*.so an httpd or apache2 process
+# has mapped) by their /proc/<pid>/exe and maps, then the binaries in those vendors' known paths that nothing
+# runs. Read-only; the version comes from "-v" (a library's from its file name) and is information only:
+# vendor builds backport fixes, so no verdict.
+p2s_foreign_php() {
+  local pid comm exe lib f sapi v seen=" "
+  while read -r pid comm; do
+    case $comm in
+      php-fpm* | php-cgi* | lsphp*)
+        exe=$(readlink "$(p2s_path "/proc/$pid/exe")" 2>/dev/null) || continue
+        exe=${exe% (deleted)}
+        [[ $seen == *" $exe "* ]] && continue
+        seen+="$exe "
+        p2s_dpkg_owned "$exe" && continue
+        case $comm in php-fpm*) sapi=fpm ;; php-cgi*) sapi=cgi ;; *) sapi=lsapi ;; esac
+        v=$(timeout 5 "$(p2s_path "$exe")" -v </dev/null 2>/dev/null | sed -nE '1s/^PHP ([0-9][^ ]*).*/\1/p')
+        echo "$exe|$sapi|yes|${v:-unknown}" ;;
+      apache2 | httpd)
+        while read -r lib; do
+          [[ $seen == *" $lib "* ]] && continue
+          seen+="$lib "
+          p2s_dpkg_owned "$lib" && continue
+          v=$(sed -nE 's/.*libphp([0-9]+(\.[0-9]+)?)\.so$/\1/p' <<<"$lib")
+          echo "$lib|apache2|yes|${v:-unknown}"
+        done < <(awk '$NF ~ /\/libphp[^\/]*\.so$/ {print $NF}' "$(p2s_path "/proc/$pid/maps")" 2>/dev/null | sort -u) ;;
+    esac
+  done < <(ps -eo pid=,comm= 2>/dev/null)
+  for f in "$(p2s_path /opt/cpanel)"/ea-php*/root/usr/sbin/php-fpm "$(p2s_path /opt/plesk/php)"/*/sbin/php-fpm \
+    "$(p2s_path /usr/local/lsws)"/lsphp*/bin/lsphp "$(p2s_path /usr/local/sbin)"/php-fpm* "$(p2s_path /usr/local/bin)"/php-cgi*; do
+    [ -x "$f" ] || continue
+    exe=${f#"${P2S_ROOT:-}"}
+    [[ $seen == *" $exe "* ]] && continue
+    seen+="$exe "
+    p2s_dpkg_owned "$exe" && continue
+    case $exe in */php-fpm*) sapi=fpm ;; */php-cgi*) sapi=cgi ;; *) sapi=lsapi ;; esac
+    v=$(timeout 5 "$f" -v </dev/null 2>/dev/null | sed -nE '1s/^PHP ([0-9][^ ]*).*/\1/p')
+    echo "$exe|$sapi|no|${v:-unknown}"
+  done
+}
