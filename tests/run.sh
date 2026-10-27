@@ -95,6 +95,7 @@ done
 # Patcher hosts: web-m as is, and copies of it with one thing going wrong each.
 derive() { # derive <new host> <file> <content>
   cp -r "$WORK/hosts/web-m" "$WORK/hosts/$1"
+  mkdir -p "$(dirname "$WORK/hosts/$1/$2")"
   printf '%s\n' "$3" >"$WORK/hosts/$1/$2"
 }
 derive web-o fail-t-php-fpm8.3 ''                  # config test fails after the change
@@ -106,6 +107,17 @@ derive web-s slow-install 3                        # connection drops mid-upgrad
 echo 1 >"$WORK/hosts/web-s/drop-after"
 derive web-u slow-install 5                        # connection drops; next run attaches to the running unit
 echo 1 >"$WORK/hosts/web-u/drop-after"
+# The host's own policy-rc.d, which the patch moves aside for its install and must put back byte for byte.
+OWNRCD=$'#!/bin/sh\n# the host\'s own policy: deny restarts of apache2 only\n[ "$1" = apache2 ] && exit 101\nexit 0'
+derive web-pa root/usr/sbin/policy-rc.d "$OWNRCD"  # a host policy-rc.d around a good install
+derive web-pb root/usr/sbin/policy-rc.d "$OWNRCD"  # ... and around a failing one
+: >"$WORK/hosts/web-pb/fail-install"
+derive web-pc root/usr/sbin/policy-rc.d "$OWNRCD"  # ... and around one whose unit is stopped (SIGTERM)
+echo 30 >"$WORK/hosts/web-pc/slow-install"
+derive web-pd root/var/lib/php2shell/policy-rc.d.kept "$OWNRCD"   # a run killed (SIGKILL) mid-install left ours
+OURRCD=$'#!/bin/sh\n# php2shell-fixer: no service actions during the patch install; removed after it\nexit 101'
+mkdir -p "$WORK/hosts/web-pd/root/usr/sbin" && printf '%s\n' "$OURRCD" >"$WORK/hosts/web-pd/root/usr/sbin/policy-rc.d"
+chmod 750 "$WORK"/hosts/web-p[abc]/root/usr/sbin/policy-rc.d "$WORK/hosts/web-pd/root/var/lib/php2shell/policy-rc.d.kept"
 # web-x's Apache listens on 127.0.0.1:8080 behind nginx: its vhosts answer plain http there and nowhere else.
 # Written here, not in the fixture: fixtures carry only package archive URLs.
 printf '%s\n' 'api.example.com 200 200' 'http://shop.example.com:8080 200 200 127.0.0.1' \
@@ -407,6 +419,8 @@ else echo "No packages found that can be upgraded unattended and no pending auto
 # "apt-get update" fails on fail-update-label (a PPA changed its Label) or fail-update. "apt-get install
 # pkg=ver..." installs into the fixture: dpkg-query.txt gets the new versions, php*-common brings the
 # candidate changelog, modules-after.txt replaces modules.txt; slow-install and fail-install shape the run.
+# Then the postinst of each installed SAPI package asks for its service, as the real ones do: php<X.Y>-fpm
+# restarts its pool, libapache2-mod-php<X.Y> reloads Apache (apache2-maintscript-helper), both via invoke-rc.d.
 stub apt-get 'cat >/dev/null
 if [ "$1" = download ]; then
   key=${!#}
@@ -437,8 +451,22 @@ case " $* " in
       esac
     done
     [ -f "$P2S_STUB/modules-after.txt" ] && cp "$P2S_STUB/modules-after.txt" "$P2S_STUB/modules.txt"
+    for a; do
+      case $a in
+        php*-fpm=*) invoke-rc.d "${a%%=*}" restart ;;
+        libapache2-mod-php*=*) invoke-rc.d apache2 reload ;;
+      esac
+    done
     exit 0 ;;
 esac'
+# invoke-rc.d <service> <action>: asks the fake root's /usr/sbin/policy-rc.d first, as invoke-rc.d does; 101
+# denies the action, anything else lets it through to systemctl.
+stub invoke-rc.d 'p=$P2S_ROOT/usr/sbin/policy-rc.d
+if [ -x "$p" ]; then
+  "$p" "$1" "$2"
+  [ $? = 101 ] && { echo "invoke-rc.d: policy-rc.d denied execution of $2."; exit 0; }
+fi
+exec systemctl "$2" "$1"'
 stub dpkg-deb 'cat >/dev/null
 [ "$1" = --fsys-tarfile ] && exec cat "$P2S_STUB/debs/$(cat "$2").tar"'
 stub apt 'exit 0'
@@ -1041,6 +1069,15 @@ has "$M" "kind=fix host=web-m branch=8.3 before=8.3.6-0ubuntu0.24.04.12 after=8.
 has "$M" "kind=fix host=web-m branch=8.5 before=8.5.12-1+ubuntu24.04.1+deb.sury.org+1 after=8.5.12-1+ubuntu24.04.1+deb.sury.org+1 target=none fixed=yes" \
   "web-m: 8.5 already fixed, nothing installed"
 has "$(grep '^systemctl restart' "$STUB_LOG")" "systemctl restart php8.3-fpm" "web-m: 8.3 pool restarted"
+# The package's postinst asks to restart the pool mid-install; policy-rc.d turns it down, so the only restart is
+# the worker's, after the config test of the new ini.
+has "$(grep '^invoke-rc.d ' "$STUB_LOG")" "invoke-rc.d php8.3-fpm restart" "web-m: the postinst asked to restart the pool"
+eq "$(grep -c '^systemctl restart php8.3-fpm' "$STUB_LOG")" 1 "web-m: the pool restarted once"
+lt=$(grep -n '^php-fpm8.3 -t' "$STUB_LOG" | tail -1 | cut -d: -f1) lr=$(grep -n '^systemctl restart php8.3-fpm' "$STUB_LOG" | head -1 | cut -d: -f1)
+[ -n "$lt" ] && [ -n "$lr" ] && [ "$lr" -gt "$lt" ] && ok "web-m: the restart comes after the config test" \
+  || bad "web-m: the restart comes after the config test" "$(cat "$STUB_LOG")"
+[ -e "$WORK/hosts/web-m/root/usr/sbin/policy-rc.d" ] && bad "web-m: no policy-rc.d left after the run" \
+  || ok "web-m: no policy-rc.d left after the run"
 hasnt "$(cat "$STUB_LOG")" "systemctl reload php8.3-fpm" "web-m: ensure leaves the reload to the restart"
 has "$M" "kind=mitigation host=web-m branch=8.3 sapi=fpm ini=absent action=written upload_progress=Off overrides=0 state=mitigated" "web-m: ensure ran for 8.3"
 eq "$(ls "$WORK/hosts/web-m/root/etc/php/8.5/fpm/conf.d/99-php2shell-backtraces.ini" 2>/dev/null)" "" "web-m: 8.5 fixed -> no backtraces ini"
@@ -1073,6 +1110,32 @@ eq "$code" 1 "web-p: pool down after restart -> exit 1"
 has "$P" "php8.3-fpm is DOWN after its restart" "web-p: says so"
 has "$P" "Main process exited, code=exited, status=78/CONFIG" "web-p: journal excerpt"
 has "$P" "restart=failed modules=same state=pool-down" "web-p: recorded"
+
+# A host's own policy-rc.d is moved aside for the install and back after it, byte for byte and with its mode,
+# whether apt succeeds, fails or the unit is stopped mid-install; ours is never left behind. One a killed run
+# (SIGKILL) left in place is put right by the next run's preflight.
+rcd() { echo "$WORK/hosts/$1/root/usr/sbin/policy-rc.d"; }
+rcdsum() { { cat "$(rcd "$1")"; stat -c %a "$(rcd "$1")"; } 2>&1; }
+OWNSUM=$(rcdsum web-pa)
+PA=$(bash "$S/run.sh" fix web-pa); code=$?
+eq "$code" 0 "web-pa: fixed with a host policy-rc.d in place"
+eq "$(rcdsum web-pa)" "$OWNSUM" "web-pa: the host's policy-rc.d is back as it was"
+eq "$(ls "$(state web-pa)" | grep -c policy-rc)" 0 "web-pa: nothing left in the state directory"
+PB=$(bash "$S/run.sh" fix web-pb); code=$?
+eq "$code" 1 "web-pb: apt fails -> exit 1"
+has "$PB" "apt-get install failed" "web-pb: says so"
+eq "$(rcdsum web-pb)" "$OWNSUM" "web-pb: the host's policy-rc.d is back as it was after a failed install"
+bash "$S/run.sh" fix web-pc >/dev/null 2>&1 &
+rp=$!
+for _ in $(seq 100); do grep -qF 'php2shell-fixer:' "$(rcd web-pc)" 2>/dev/null && break; sleep 0.1; done
+has "$(cat "$(rcd web-pc)")" "php2shell-fixer: no service actions" "web-pc: ours in place during the install"
+kill -TERM -- "-$(cat "$WORK/hosts/web-pc/units/"php2shell-fix-*.pid)"
+wait "$rp"
+eq "$(rcdsum web-pc)" "$OWNSUM" "web-pc: unit stopped mid-install: the host's policy-rc.d is back as it was"
+PD=$(bash "$S/run.sh" fix web-pd); code=$?
+eq "$code" 0 "web-pd: ours left by a killed run: the next run goes ahead"
+eq "$(rcdsum web-pd)" "$OWNSUM" "web-pd: the host's policy-rc.d is back as it was"
+eq "$(ls "$(state web-pd)" | grep -c policy-rc)" 0 "web-pd: nothing left in the state directory"
 
 Q=$(bash "$S/run.sh" fix web-q); code=$?
 eq "$code" 1 "web-q: held package -> exit 1"
@@ -1156,6 +1219,7 @@ has "$X" "kind=fix host=web-x branch=8.3 before=8.3.6-0ubuntu0.24.04.12 after=8.
 eq "$(grep -E '^systemctl (restart|reload) ' "$STUB_LOG" | sort)" "$(printf 'systemctl restart apache2\nsystemctl restart php8.3-fpm')" \
   "web-x: the pool and Apache restarted once each, no reload"
 has "$(grep -E '^(php-fpm8.3 -t|apachectl configtest)' "$STUB_LOG" | sort -u)" "$(printf 'apachectl configtest\nphp-fpm8.3 -t')" "web-x: both config tests ran"
+has "$(grep '^invoke-rc.d ' "$STUB_LOG")" "invoke-rc.d apache2 reload" "web-x: mod_php's postinst asked to reload Apache, and was turned down"
 has "$X" "kind=mitigation host=web-x branch=8.3 sapi=apache2 ini=absent action=written upload_progress=Off overrides=0 state=mitigated" \
   "web-x: mod_php mitigated"
 has "$X" "kind=mitigation host=web-x branch=8.3 sapi=fpm ini=absent action=written upload_progress=Off overrides=0 state=mitigated" \
