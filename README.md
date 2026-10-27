@@ -37,7 +37,7 @@ Why not just `php -v`? Ubuntu ships the fix as `8.3.6-0ubuntu0.24.04.13`, and `p
 
 Under the tables the report lists host facts that help decide how to patch: which site runs on which PHP-FPM pool (a pool no site uses is marked as a stop candidate), held PHP packages, the ondrej PPA sources and whether the PPA changed its Release info (then `apt-get update` refuses it until you accept the change), and whether unattended-upgrades covers the PPA at all. To check the Release info the audit downloads the PPA's current `InRelease` file into a temp folder and deletes it right after, the same way it handles candidate packages.
 
-The target comes from the package lists already on the server: the audit only reads, so it never runs `apt-get update`. "none" means the server's lists hold no fixed build, not that no fix exists. When the report marks the lists as older than the fixes, run `apt-get update` on the server and audit again before you decide anything.
+The target comes from the package lists already on the server: the audit only reads, so it never runs `apt-get update`. "none" means the server's lists hold no fixed build, not that no fix exists. When the report marks the lists as older than the fixes, run `apt-get update` on the server and audit again before you decide anything. Two releases are the exception, and the report says so under the table: Debian 11 gets no PHP2Shell fix at all (`no-fix-for-release`), and Ubuntu 20.04 and older get it only through Ubuntu Pro ESM (`fix-only-in-esm` while no ESM source is enabled). There `apt-get update` changes nothing, and `next.sh` answers `manual` once the host is mitigated.
 
 ## Many servers, and picking up where you left off
 
