@@ -9,7 +9,8 @@
 # apachectl configtest for mod_php) and a restart of its service (the pool, or apache2), and one "fix" record.
 # Runs as the tail of the bundle from run.sh (after versions.sh, p2s.sh, mitigation.sh, hostfacts.sh,
 # branch.sh): run.sh fix <host>
-# Server state: /var/lib/php2shell/fix-<stamp>.{log,exit,worker.sh,reported} and "current" (the last run).
+# Server state: /var/lib/php2shell/fix-<stamp>.{log,exit,worker.sh,reported} and "current" (the last run);
+# debs-<stamp>/php<X.Y>/ holds the builds a run replaced, for its rollback (the last three runs).
 # Exit (the worker's, passed on): 0 every running branch fixed and HTTP unchanged; 3 a branch still unfixed
 #   (mitigation applied) or an HTTP status changed; 1 preflight failed, policy-rc.d could not be put in place
 #   or back, apt failed, a config test failed or a pool or Apache is down after its restart.
@@ -80,6 +81,32 @@ p2s_rcd_block() {
   return 1
 }
 
+# The branch's packages at their installed builds, kept for the rollback: the -security and -updates pockets
+# keep only the newest revision and apt's cache is often cleaned, so after the install the old build may be
+# gone from both. apt-get download first; dpkg-repack (rebuilt from the installed files) where it is installed.
+# One directory per run, debs-<stamp>/php<X.Y>; the first branch of a run that keeps any removes all but the
+# two newest older runs, so the last three stay. $1 run stamp, $2 branch, then the packages. Sets
+# P2S_DEBS_DIR, P2S_DEBS_KEPT and P2S_DEBS_MISSING (both "<package>=<version>").
+p2s_keep_debs() {
+  local stamp=$1 branch=$2 run old p v
+  shift 2
+  run=$P2S_STATE/debs-$stamp P2S_DEBS_DIR=$P2S_STATE/debs-$stamp/php$branch P2S_DEBS_KEPT=() P2S_DEBS_MISSING=()
+  if [ ! -d "$run" ]; then
+    old=("$P2S_STATE"/debs-*)
+    if [ -d "${old[0]}" ] && [ ${#old[@]} -gt 2 ]; then rm -rf "${old[@]:0:${#old[@]}-2}"; fi
+  fi
+  mkdir -p "$P2S_DEBS_DIR" || { P2S_DEBS_DIR=""; }
+  for p; do
+    v=$(dpkg-query -W -f='${Version}' "$p" </dev/null 2>/dev/null)
+    if [ -n "$P2S_DEBS_DIR" ] && { (cd "$P2S_DEBS_DIR" && apt-get download -q "$p=$v" </dev/null >/dev/null 2>&1) \
+      || (cd "$P2S_DEBS_DIR" && dpkg-repack "$p" </dev/null >/dev/null 2>&1); }; then
+      P2S_DEBS_KEPT+=("$p=$v")
+    else
+      P2S_DEBS_MISSING+=("$p=$v")
+    fi
+  done
+}
+
 # The patch. $1 run stamp. Returns 0, 1 or 3 as described at the top.
 p2s_fix_worker() {
   local stamp=$1 host held upd urc fields backup before_probe after_probe
@@ -87,7 +114,7 @@ p2s_fix_worker() {
   host=$(hostname </dev/null)
   echo "== php2shell fix: $host ($(p2s_os)), run $stamp"
   p2s_record kind=host host="$host" os="$(p2s_os)"
-  P2S_RC=0 P2S_ROLLBACK=()
+  P2S_RC=0 P2S_ROLLBACK=() P2S_DEBS_NOTE=()
   P2S_TMP=$(mktemp -d)
   # shellcheck disable=SC2064
   trap "rm -rf '$P2S_TMP'" RETURN
@@ -132,7 +159,7 @@ p2s_fix_worker() {
   p2s_record kind=preflight host="$host" result=ok backup="$backup" sites="$(grep -c . <<<"$before_probe")"
 
   local all branch b sapi pkg ver row running idle psapi ppkg before pkgs installed bstate after nver cve
-  local vafter rafter sbefore safter svafter unit state restart mods ini85 changed
+  local vafter rafter sbefore safter svafter unit state restart mods ini85 changed rb
   local -A mbefore needed
   all=$(p2s_branch_packages)
   for branch in $(awk -F'|' '!seen[$1]++ {print $1}' <<<"$all"); do
@@ -176,6 +203,16 @@ p2s_fix_worker() {
       echo "php$branch: $before is $BR_VERDICT; no install ($BR_TREASON)"
     else
       echo "php$branch: $before -> $BR_TARGET for: $pkgs"
+      # shellcheck disable=SC2086
+      p2s_keep_debs "$stamp" "$branch" $pkgs
+      echo "php$branch: ${#P2S_DEBS_KEPT[@]} .deb kept for the rollback in ${P2S_DEBS_DIR#"${P2S_ROOT:-}"}"
+      if [ ${#P2S_DEBS_MISSING[@]} -gt 0 ]; then
+        echo "WARNING: php$branch: no .deb kept of ${P2S_DEBS_MISSING[*]}; its rollback relies on the archive still offering it"
+        P2S_DEBS_NOTE+=("php$branch: no .deb kept of ${P2S_DEBS_MISSING[*]}")
+      fi
+      p2s_record kind=rollback_debs host="$host" branch="$branch" dir="${P2S_DEBS_DIR#"${P2S_ROOT:-}"}" \
+        kept="$(if [ ${#P2S_DEBS_KEPT[@]} -gt 0 ]; then IFS=,; echo "${P2S_DEBS_KEPT[*]}"; else echo -; fi)" \
+        missing="$(if [ ${#P2S_DEBS_MISSING[@]} -gt 0 ]; then IFS=,; echo "${P2S_DEBS_MISSING[*]}"; else echo -; fi)"
       if ! p2s_rcd_block; then
         echo "STOP: could not put policy-rc.d in place; php$branch not installed, so no maintainer script restarts it"
         bstate=rcd-failed
@@ -188,7 +225,11 @@ p2s_fix_worker() {
         if apt-get -o DPkg::Lock::Timeout=600 -o Acquire::Retries=5 -o Dpkg::Options::=--force-confold \
           install -y -q --allow-downgrades $(for p in $pkgs; do printf '%s=%s ' "$p" "$BR_TARGET"; done) </dev/null; then
           installed=yes
-          P2S_ROLLBACK+=("apt-get install --allow-downgrades $(for p in $pkgs; do printf '%s=%s ' "$p" "$before"; done)")
+          # The kept files, and by version (the old line) whatever could not be kept.
+          rb="apt-get install --allow-downgrades"
+          [ ${#P2S_DEBS_KEPT[@]} -eq 0 ] || rb+=" ${P2S_DEBS_DIR#"${P2S_ROOT:-}"}/*.deb"
+          [ ${#P2S_DEBS_MISSING[@]} -eq 0 ] || rb+=" ${P2S_DEBS_MISSING[*]}"
+          P2S_ROLLBACK+=("$rb")
         else
           echo "apt-get install failed"
           bstate=apt-failed
@@ -285,6 +326,7 @@ p2s_fix_worker() {
   echo "rollback:"
   echo "  tar xzf $backup -C /   # /etc/php as it was before this run, then restart the pools"
   [ ${#P2S_ROLLBACK[@]} -eq 0 ] || printf '  %s\n' "${P2S_ROLLBACK[@]}"
+  [ ${#P2S_DEBS_NOTE[@]} -eq 0 ] || printf 'WARNING: %s\n' "${P2S_DEBS_NOTE[@]}"
   echo "exit $P2S_RC"
   return "$P2S_RC"
 }
