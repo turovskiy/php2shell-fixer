@@ -98,6 +98,8 @@ derive() { # derive <new host> <file> <content>
   mkdir -p "$(dirname "$WORK/hosts/$1/$2")"
   printf '%s\n' "$3" >"$WORK/hosts/$1/$2"
 }
+# web-m's installed 8.3 builds are still in the archive, so the patch can keep them for the rollback.
+printf '%s\n' php8.3-{fpm,common,cli,opcache}=8.3.6-0ubuntu0.24.04.12 >"$WORK/hosts/web-m/downloadable.txt"
 derive web-o fail-t-php-fpm8.3 ''                  # config test fails after the change
 derive web-p fail-restart-php8.3-fpm ''            # pool does not come back after its restart
 derive web-q holds.txt php8.3-fpm                  # held package
@@ -114,6 +116,13 @@ derive web-pb root/usr/sbin/policy-rc.d "$OWNRCD"  # ... and around a failing on
 : >"$WORK/hosts/web-pb/fail-install"
 derive web-pc root/usr/sbin/policy-rc.d "$OWNRCD"  # ... and around one whose unit is stopped (SIGTERM)
 echo 30 >"$WORK/hosts/web-pc/slow-install"
+derive web-pe downloadable.txt ''                  # the old build is gone from the archive
+derive web-pf downloadable.txt ''                  # ... but dpkg-repack is installed
+: >"$WORK/hosts/web-pf/dpkg-repack"
+derive web-pg downloadable.txt "$(cat "$WORK/hosts/web-m/downloadable.txt")"   # three earlier runs kept .debs
+for s in 20261001T000000000Z 20261002T000000000Z 20261003T000000000Z; do
+  mkdir -p "$WORK/hosts/web-pg/root/var/lib/php2shell/debs-$s/php8.3"
+done
 derive web-pd root/var/lib/php2shell/policy-rc.d.kept "$OWNRCD"   # a run killed (SIGKILL) mid-install left ours
 OURRCD=$'#!/bin/sh\n# php2shell-fixer: no service actions during the patch install; removed after it\nexit 101'
 mkdir -p "$WORK/hosts/web-pd/root/usr/sbin" && printf '%s\n' "$OURRCD" >"$WORK/hosts/web-pd/root/usr/sbin/policy-rc.d"
@@ -434,7 +443,8 @@ while read -r o p; do
 done 2>/dev/null <"$P2S_STUB/uu-upgrades.txt"
 if [ ${#up[@]} -gt 0 ]; then echo "Packages that will be upgraded: ${up[*]}"
 else echo "No packages found that can be upgraded unattended and no pending auto-removals"; fi'
-# "apt-get download pkg=ver" leaves a .deb naming its fixture; a version without a fixture is not found.
+# "apt-get download pkg=ver" leaves a .deb naming its fixture, or naming the key for one listed in
+# downloadable.txt (a build the archive still offers); any other version is not found.
 # apt-get and dpkg-deb drain stdin, as a prompting tool would: the audit itself arrives on stdin, so a call
 # without </dev/null swallows the rest of the program (or the remaining branches) and records go missing.
 # "apt-get update" fails on fail-update-label (a PPA changed its Label) or fail-update. "apt-get install
@@ -445,7 +455,8 @@ else echo "No packages found that can be upgraded unattended and no pending auto
 stub apt-get 'cat >/dev/null
 if [ "$1" = download ]; then
   key=${!#}
-  [ -f "$P2S_STUB/debs/$key.tar" ] || { echo "E: Version ${key#*=} for ${key%%=*} was not found" >&2; exit 100; }
+  [ -f "$P2S_STUB/debs/$key.tar" ] || grep -qxF "$key" "$P2S_STUB/downloadable.txt" 2>/dev/null \
+    || { echo "E: Version ${key#*=} for ${key%%=*} was not found" >&2; exit 100; }
   echo "$key" >"${key%%=*}_${key#*=}_amd64.deb"
   exit 0
 fi
@@ -488,6 +499,12 @@ if [ -x "$p" ]; then
   [ $? = 101 ] && { echo "invoke-rc.d: policy-rc.d denied execution of $2."; exit 0; }
 fi
 exec systemctl "$2" "$1"'
+# dpkg-repack <package>: only on a host with a "dpkg-repack" file (the tool is rarely installed); builds
+# <package>_<installed version>_amd64.deb in the current directory.
+stub dpkg-repack 'cat >/dev/null
+[ -e "$P2S_STUB/dpkg-repack" ] || { echo "dpkg-repack: command not found" >&2; exit 127; }
+v=$(awk -F"|" -v p="$1" "\$2 == p {print \$3}" "$P2S_STUB/dpkg-query.txt")
+echo "repacked $1=$v" >"$1_${v}_amd64.deb"'
 stub dpkg-deb 'cat >/dev/null
 [ "$1" = --fsys-tarfile ] && exec cat "$P2S_STUB/debs/$(cat "$2").tar"'
 stub apt 'exit 0'
@@ -1123,7 +1140,14 @@ has "$M" "kind=probe host=web-m name=shop.example.com before=200 after=200" "web
 has "$M" "kind=probe_summary host=web-m state=unchanged" "web-m: HTTP unchanged"
 eq "$(ls "$WORK/hosts/web-m/root/root/"etc-php-*.tgz 2>/dev/null | wc -l)" 1 "web-m: /etc/php backed up"
 has "$M" "tar xzf /root/etc-php-" "web-m: rollback: restore the backup"
-has "$M" "apt-get install --allow-downgrades php8.3-cli=8.3.6-0ubuntu0.24.04.12 php8.3-common=8.3.6-0ubuntu0.24.04.12" "web-m: rollback: back to the old build"
+# The old build is kept as .debs before the install, so the rollback does not depend on the archive keeping it.
+MD=$(cd "$(state web-m)" && echo debs-*/php8.3)
+eq "$(cd "$(state web-m)/$MD" && ls)" "$(printf '%s\n' php8.3-{cli,common,fpm,opcache}_8.3.6-0ubuntu0.24.04.12_amd64.deb)" \
+  "web-m: every 8.3 package kept at its installed build"
+has "$M" "apt-get install --allow-downgrades /var/lib/php2shell/$MD/*.deb" "web-m: rollback: the kept .debs"
+hasnt "$M" "--allow-downgrades php8.3-cli=" "web-m: rollback: no line that needs the archive"
+has "$M" "kind=rollback_debs host=web-m branch=8.3 dir=/var/lib/php2shell/$MD kept=php8.3-cli=8.3.6-0ubuntu0.24.04.12,php8.3-common=8.3.6-0ubuntu0.24.04.12,php8.3-fpm=8.3.6-0ubuntu0.24.04.12,php8.3-opcache=8.3.6-0ubuntu0.24.04.12 missing=-" \
+  "web-m: rollback_debs record"
 has "$M" "rm /etc/php/8.3/fpm/conf.d/99-security.ini && systemctl reload php8.3-fpm" "web-m: rollback: the ini"
 has "$M" "kind=run_end target=web-m mode=fix exit=0 status=ok" "web-m: runner closes the log"
 
@@ -1175,6 +1199,37 @@ hasnt "$PD" "is not back" "web-pd: no warning about a kept policy-rc.d"
 eq "$code" 0 "web-pd: ours left by a killed run: the next run goes ahead"
 eq "$(rcdsum web-pd)" "$OWNSUM" "web-pd: the host's policy-rc.d is back as it was"
 eq "$(find "$(state web-pd)" -maxdepth 1 -name 'policy-rc*' | wc -l)" 0 "web-pd: nothing left in the state directory"
+
+# The old build is gone from the archive: nothing can be kept, the summary says which packages, the rollback
+# falls back to the versions, and the patch still goes on.
+PE=$(bash "$S/run.sh" fix web-pe); code=$?
+eq "$code" 0 "web-pe: old build not downloadable: the patch goes on, exit 0"
+has "$PE" "fixed=yes restart=done modules=same state=fixed" "web-pe: 8.3 fixed"
+has "$PE" "WARNING: php8.3: no .deb kept of php8.3-cli=8.3.6-0ubuntu0.24.04.12 php8.3-common=8.3.6-0ubuntu0.24.04.12 php8.3-fpm=8.3.6-0ubuntu0.24.04.12 php8.3-opcache=8.3.6-0ubuntu0.24.04.12" \
+  "web-pe: the summary names the packages"
+has "$PE" "kind=rollback_debs host=web-pe branch=8.3" "web-pe: rollback_debs record"
+has "$PE" "kept=- missing=php8.3-cli=8.3.6-0ubuntu0.24.04.12,php8.3-common=" "web-pe: the record names what is missing"
+has "$PE" "apt-get install --allow-downgrades php8.3-cli=8.3.6-0ubuntu0.24.04.12 php8.3-common=8.3.6-0ubuntu0.24.04.12" \
+  "web-pe: rollback: the old line by version"
+hasnt "$PE" "*.deb" "web-pe: rollback: no .deb line"
+has "$(bash "$S/report.sh" "$(sed -n 's/^log: //p' <<<"$PE")")" '**php8.3: no .deb kept of `php8.3-cli=8.3.6-0ubuntu0.24.04.12 php8.3-common=' \
+  "report: the packages kept for no rollback"
+has "$(bash "$S/report.sh" "$(sed -n 's/^log: //p' <<<"$M")")" "php8.3 build before the patch kept for the rollback: \`/var/lib/php2shell/$MD\`" \
+  "report: where the rollback .debs are"
+# Not downloadable, but dpkg-repack rebuilds each package from its installed files.
+PF=$(bash "$S/run.sh" fix web-pf); code=$?
+eq "$code" 0 "web-pf: repacked, exit 0"
+eq "$(cat "$(state web-pf)"/debs-*/php8.3/php8.3-fpm_8.3.6-0ubuntu0.24.04.12_amd64.deb)" "repacked php8.3-fpm=8.3.6-0ubuntu0.24.04.12" \
+  "web-pf: php8.3-fpm rebuilt by dpkg-repack"
+has "$PF" "missing=-" "web-pf: nothing missing"
+has "$PF" "/php8.3/*.deb" "web-pf: rollback: the repacked .debs"
+# Three earlier runs kept .debs: this one removes the oldest only, so the last three runs stay.
+PG=$(bash "$S/run.sh" fix web-pg); code=$?
+eq "$code" 0 "web-pg: exit 0"
+has "$PG" "kind=rollback_debs host=web-pg branch=8.3" "web-pg: rollback_debs record"
+eq "$(cd "$(state web-pg)" && ls -d debs-* | head -2 | paste -sd' ')" "debs-20261002T000000000Z debs-20261003T000000000Z" \
+  "web-pg: the oldest run's .debs removed, the next two kept"
+eq "$(cd "$(state web-pg)" && ls -d debs-* | wc -l)" 3 "web-pg: three runs' .debs remain, this one's included"
 
 Q=$(bash "$S/run.sh" fix web-q); code=$?
 eq "$code" 1 "web-q: held package -> exit 1"

@@ -183,6 +183,13 @@ while IFS=$'\t' read -r _ _ _ log; do
           facts+=("- Backup before the patch: \`${r[backup]}\`")
         fi
         ;;
+      rollback_debs)
+        if [ "${r[missing]}" = - ]; then
+          facts+=("- php${r[branch]} build before the patch kept for the rollback: \`${r[dir]}\`")
+        else
+          facts+=("- **php${r[branch]}: no .deb kept of \`${r[missing]//,/ }\`**; its rollback needs the archive to still offer that build")
+        fi
+        ;;
       fix)
         case ${r[state]} in fixed) fs=fixed ;; *) fs="**${r[state]}**" ;; esac
         tg=${r[target]}
