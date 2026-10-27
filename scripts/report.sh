@@ -28,7 +28,7 @@ for log in "${logs[@]}"; do
   [ -r "$log" ] || { echo "unreadable log: $log" >&2; rc=1; }
 done
 branches=() mitigations=() overrides=() sites=() pools=() holds=() sources=() origins=() facts=() patches=() probes=()
-keeps=() klines=() gaps=() foreigns=() iocs=() iocfiles=()
+keeps=() klines=() gaps=() foreigns=() iocs=() iocfiles=() hardens=()
 dec() { local v=${1//%20/ }; echo "${v//%25/%}"; }   # values were encoded with p2s_enc
 flush() { # print the current host section
   [ -n "${cur_host:-}" ] || return 0
@@ -53,6 +53,12 @@ flush() { # print the current host section
     echo 'Pool and Apache overrides of `session.upload_progress.enabled`:'
     echo
     printf '%s\n' "${overrides[@]}"
+  fi
+  if [ ${#hardens[@]} -gt 0 ]; then
+    [ ${#branches[@]} -eq 0 ] && [ ${#mitigations[@]} -eq 0 ] || echo
+    echo '**Harden** (opt-in stopgap for unfixed branches: a worker per request, a runaway script killed by the cgroup):'
+    printf '\n| Branch | SAPI | memory_limit (admin) | pm.max_requests | MemoryMax | State |\n|---|---|---|---|---|---|\n'
+    printf '%s\n' "${hardens[@]}"
   fi
   if [ ${#foreigns[@]} -gt 0 ]; then
     [ ${#branches[@]} -eq 0 ] && [ ${#mitigations[@]} -eq 0 ] || echo
@@ -87,7 +93,7 @@ flush() { # print the current host section
   # run is about apt, not about the SAPIs.
   [ ${#branches[@]} -gt 0 ] || [ ${#mitigations[@]} -gt 0 ] || [ ${#patches[@]} -gt 0 ] || [ ${#foreigns[@]} -gt 0 ] \
     || [ "$mode_seen" = fix ] \
-    || [ "$mode_seen" = autoupdate ] || echo 'No PHP-FPM, mod_php or PHP-CGI installed.'
+    || [ "$mode_seen" = autoupdate ] || [ ${#hardens[@]} -gt 0 ] || echo 'No PHP-FPM, mod_php or PHP-CGI installed.'
   if [ ${#iocs[@]} -gt 0 ]; then
     printf '\n### Indicators of compromise\n\n'
     echo 'For review, not a verdict: a CMS update changes many PHP files, and a clean result is no proof.'
@@ -121,7 +127,7 @@ flush() { # print the current host section
     printf '\nunattended-upgrades origins: %s\n' "${origins[*]}"
   fi
   branches=() mitigations=() overrides=() sites=() pools=() holds=() sources=() origins=() facts=() patches=() probes=()
-  keeps=() klines=() gaps=() foreigns=() iocs=() iocfiles=()
+  keeps=() klines=() gaps=() foreigns=() iocs=() iocfiles=() hardens=()
 }
 
 echo "# PHP2Shell report"
@@ -330,6 +336,10 @@ while IFS=$'\t' read -r _ _ _ log; do
         iocs+=("$io")
         ;;
       ioc_file) iocfiles+=("- ${r[mtime]} \`$(dec "${r[path]}")\`") ;;
+      harden)
+        hardens+=("$(printf '| %s | %s | %s | %s | %s | %s |' "${r[branch]}" "${r[sapi]}" "${r[memory_limit]}" "${r[max_requests]}" \
+          "${r[memory_max]}" "${r[state]}")")
+        ;;
       foreign_php)
         foreigns+=("$(printf '| `%s` | %s | %s | %s | %s |' "${r[path]}" "${r[sapi]}" "${r[source]}" "${r[version]}" "${r[running]}")")
         ;;

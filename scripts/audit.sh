@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # Read-only PHP2Shell audit of one host. Changes nothing.
 # Runs as the tail of the bundle from run.sh (after versions.sh, p2s.sh, mitigation.sh, hostfacts.sh, ioc.sh,
-# branch.sh):
+# harden.sh, branch.sh):
 # run.sh audit <host>
 # Output: a human-readable section plus "@p2s" records (schema in p2s.sh): one "branch" record per PHP-FPM
 # or mod_php (SAPI apache2) branch with its verdict and target, one "candidate" record per build apt offers
@@ -54,6 +54,15 @@ while read -r mbranch msapi; do
   p2s_mitigation_report "$host" "$mbranch" "$msapi" "$owner" inspected
   echo "php$mbranch $msapi: 99-security.ini $owner -> $P2S_MSTATE"
 done <<<"$(p2s_web_sapis)"
+
+# What the opt-in harden mode has in place, per SAPI; nothing when none of it is.
+while IFS='|' read -r branch sapi pkg ver; do
+  [ -n "$branch" ] || continue
+  read -r hml hmr hmm <<<"$(p2s_harden_state "$branch" "$sapi")"
+  [ "$hml$hmr$hmm" = --- ] && continue
+  p2s_record kind=harden host="$host" branch="$branch" sapi="$sapi" memory_limit="$hml" max_requests="$hmr" memory_max="$hmm" state=in-place
+  echo "php$branch $sapi: harden in place (memory_limit $hml, max_requests $hmr, MemoryMax $hmm)"
+done <<<"$pkgs"
 
 hook=$(p2s_hook_state)
 p2s_record kind=ensure_hook host="$host" state="$hook"

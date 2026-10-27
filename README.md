@@ -112,6 +112,25 @@ If a server already has an equivalent pin or PPA entry, under any file name, the
 
 This is a write on the server, so run it yourself or approve it when Claude asks.
 
+## A stopgap for PHP that stays unpatched
+
+```
+bash scripts/run.sh harden <host>
+P2S_MEMORY_MAX=4G bash scripts/run.sh harden <host>   # a fixed cap instead of 75% of the server's RAM
+```
+
+Sometimes a PHP version cannot be patched yet: the release gets no free fix, or the vendor's build is late. The upload_progress setting from `ensure` closes two of the three ways in, but not the one that exhausts memory. This command adds the extra protections the vendors recommend, only for PHP versions the audit would call unfixed, and only when you run it. `fix` and `ensure` never do this.
+
+What it changes, per PHP version:
+
+1. Each PHP-FPM pool gets `memory_limit = -1` as an admin setting (so a site cannot raise or lower it with `ini_set()`, as WordPress does) and `pm.max_requests = 1`. The pool's own `pm.max_requests` is commented out, not deleted. Each pool file is backed up to `/var/lib/php2shell/backup` first, and `php-fpm -t` must pass; if it fails, every pool file is put back and nothing restarts.
+2. For Apache mod_php, `/etc/apache2/conf-available/php2shell-harden.conf` sets the same memory limit, and `apachectl configtest` must pass.
+3. The service (`php<X.Y>-fpm` or `apache2`) gets a systemd memory cap, `MemoryMax=75%` by default, so one request cannot take all the server's RAM. If the service already has its own `MemoryMax`, it is left alone and reported.
+
+What it costs: every PHP-FPM worker is replaced after each request, which costs CPU and some latency on a busy site. A script that runs away with memory is now killed by the system's memory cap instead of stopping with a PHP error. Apache's prefork mode has no per-request replacement, so mod_php gets only the memory limit and the cap. It is a stopgap until the real fix is installed, and you decide per server whether the site can live with it.
+
+Running it again on a hardened server changes nothing. Every run prints the commands that undo it, and the audit and the report show what is in place.
+
 ## Tests
 
 ```

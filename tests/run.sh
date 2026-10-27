@@ -186,6 +186,12 @@ derive web-rd ps.txt "$(printf '%s\n' '401 1 php-fpm8.3 php-fpm: pool www' '402 
 derive web-re kernel.log '2026-10-20T03:00:00+0000 web-re kernel: php-fpm8.3[401]: segfault at 0 ip 0000 sp 0000 error 4 in php-fpm8.3'
 mkdir -p "$WORK/hosts/web-re/root/dev/shm"; : >"$WORK/hosts/web-re/root/dev/shm/.s.php"
 touch -d 2026-10-20T03:01:00 "$WORK/hosts/web-re/root/dev/shm/.s.php"
+# harden on web-m's unfixed 8.3 (its 8.5 is fixed): web-ha with a pm.max_requests of its own, web-hb whose
+# config test fails, web-hc whose unit already has MemoryMax and LimitAS; web-hd is web-x (FPM and mod_php).
+derive web-ha root/etc/php/8.3/fpm/pool.d/www.conf "$(printf '%s\n' '[www]' 'user = www-data' 'listen = /run/php/php8.3-fpm.sock' 'pm = dynamic' 'pm.max_requests = 500')"
+derive web-hb fail-t-php-fpm8.3 ''
+derive web-hc limits.txt "$(printf '%s\n' 'php8.3-fpm MemoryMax=2147483648' 'php8.3-fpm LimitAS=4294967296')"
+cp -r "$WORK/hosts/web-x" "$WORK/hosts/web-hd"
 derive web-pd root/var/lib/php2shell/policy-rc.d.kept "$OWNRCD"   # a run killed (SIGKILL) mid-install left ours
 OURRCD=$'#!/bin/sh\n# php2shell-fixer: no service actions during the patch install; removed after it\nexit 101'
 mkdir -p "$WORK/hosts/web-pd/root/usr/sbin" && printf '%s\n' "$OURRCD" >"$WORK/hosts/web-pd/root/usr/sbin/policy-rc.d"
@@ -319,6 +325,13 @@ if [ "$1" = restart ]; then
   exit 0
 fi
 [ "$1" = reload ] && [ -e "$P2S_STUB/fail-reload" ] && exit 1
+# show -p MemoryMax -p LimitAS -p LimitDATA <unit>: limits.txt lines "<unit> <Key>=<value>", the rest infinity
+if [ "$1" = show ] && [ "$3" = MemoryMax ]; then
+  for k in MemoryMax LimitAS LimitDATA; do
+    v=$(sed -n "s/^${!#} $k=//p" "$P2S_STUB/limits.txt" 2>/dev/null); echo "$k=${v:-infinity}"
+  done
+  exit 0
+fi
 # show -p ActiveEnterTimestamp --value <unit>: start time from started.txt ("<unit> <time>"), empty if absent
 [ "$1" = show ] && [ -f "$P2S_STUB/started.txt" ] && sed -n "s/^${!#} //p" "$P2S_STUB/started.txt"
 exit 0'
@@ -590,6 +603,10 @@ stub dpkg-repack 'cat >/dev/null
 [ -e "$P2S_STUB/dpkg-repack" ] || { echo "dpkg-repack: command not found" >&2; exit 127; }
 v=$(awk -F"|" -v p="$1" "\$2 == p {print \$3}" "$P2S_STUB/dpkg-query.txt")
 echo "repacked $1=$v" >"$1_${v}_amd64.deb"'
+# a2enconf / a2disconf [-q] <name>: the conf-enabled symlink in the fake root, as Debian's tools make it.
+stub a2enconf 'n=${!#}; [ -f "$P2S_ROOT/etc/apache2/conf-available/$n.conf" ] || { echo "ERROR: Conf $n does not exist!" >&2; exit 1; }
+mkdir -p "$P2S_ROOT/etc/apache2/conf-enabled"; ln -sf "../conf-available/$n.conf" "$P2S_ROOT/etc/apache2/conf-enabled/$n.conf"'
+stub a2disconf 'rm -f "$P2S_ROOT/etc/apache2/conf-enabled/${!#}.conf"'
 stub dpkg-deb 'cat >/dev/null
 [ "$1" = --fsys-tarfile ] && exec cat "$P2S_STUB/debs/$(cat "$2").tar"'
 stub apt 'exit 0'
@@ -719,6 +736,7 @@ mkdir -p "$TMPDIR"
 # Calls an audit may make; anything else in the stub log is a write or a package operation.
 READ_ONLY='^(ssh (-o [^ ]+ )*[^ ]+ bash -s|hostname ?|apachectl -t -D DUMP_INCLUDES|dpkg-query .*|systemctl is-active [^ ]+|systemctl show -p ActiveEnterTimestamp --value [^ ]+|dpkg --compare-versions .*|dpkg -S [^ ]+|ps -eo [^ ]+|journalctl -k .*|apt-cache madison [^ ]+|apt-cache policy [^ ]+|apt-get download -q [^ ]+|dpkg-deb --fsys-tarfile [^ ]+|php-(fpm|cgi)[0-9.]+ -i|php[0-9.]+ -c [^ ]+ -i|apt-mark showhold|apt-config dump|nginx -T|apt-helper .* download-file [^ ]+ [^ ]+)$'
 fingerprint() { (cd "$WORK/hosts" && find . -type f -exec md5sum {} + | sort); }
+tree() { (cd "$WORK/hosts/$1" && find . -type d | sort && find . -type f -exec md5sum {} + | sort); }
 
 echo "▸ verdict (installed build)"
 # shellcheck source=../scripts/lib/versions.sh
@@ -1309,6 +1327,68 @@ eq "$(bash "$S/next.sh" "$(bash "$S/run.sh" audit web-rd | sed -n 's/^log: //p')
 eq "$(bash "$S/next.sh" "$(bash "$S/run.sh" audit web-re | sed -n 's/^log: //p')" | cut -d' ' -f2)" "investigate" \
   "web-re: a crash plus a new PHP file in /dev/shm -> investigate"
 
+echo "▸ harden"
+POOLA=$WORK/hosts/web-ha/root/etc/php/8.3/fpm/pool.d/www.conf DROPA=$WORK/hosts/web-ha/root/etc/systemd/system/php8.3-fpm.service.d/php2shell-memory.conf
+POOL0=$(cat "$POOLA") POOL85=$(cat "$WORK/hosts/web-ha/root/etc/php/8.5/fpm/pool.d/www.conf")
+: >"$STUB_LOG"
+HA=$(bash "$S/run.sh" harden web-ha); code=$?
+eq "$code" 0 "web-ha: harden exit 0"
+has "$(cat "$POOLA")" "$(printf '%s\n' ';php2shell-fixer-was: pm.max_requests = 500' '; php2shell-fixer harden (CVE-2026-109618) until a fixed build is installed' 'php_admin_value[memory_limit] = -1' 'pm.max_requests = 1' '; php2shell-fixer harden end')" \
+  "web-ha: marked block at the end of the pool, its own pm.max_requests commented out"
+has "$(cat "$DROPA" 2>/dev/null)" "$(printf '[Service]\nMemoryMax=75%%')" "web-ha: MemoryMax drop-in, 75% by default"
+lt=$(grep -n '^php-fpm8.3 -t' "$STUB_LOG" | tail -1 | cut -d: -f1) lr=$(grep -n '^systemctl restart php8.3-fpm' "$STUB_LOG" | head -1 | cut -d: -f1)
+[ -n "$lt" ] && [ -n "$lr" ] && [ "$lr" -gt "$lt" ] && ok "web-ha: php-fpm -t before the restart" || bad "web-ha: php-fpm -t before the restart" "$(cat "$STUB_LOG")"
+eq "$(grep -c '^systemctl daemon-reload' "$STUB_LOG")" 1 "web-ha: daemon-reload for the drop-in"
+has "$HA" "kind=harden host=web-ha branch=8.3 sapi=fpm memory_limit=-1 max_requests=1 memory_max=75% state=hardened" "web-ha: 8.3 record"
+has "$HA" "kind=harden host=web-ha branch=8.5 sapi=fpm memory_limit=- max_requests=- memory_max=- state=skipped-fixed" "web-ha: fixed 8.5 skipped"
+eq "$(cat "$WORK/hosts/web-ha/root/etc/php/8.5/fpm/pool.d/www.conf")" "$POOL85" "web-ha: fixed 8.5's pool untouched"
+eq "$(ls "$WORK/hosts/web-ha/root/etc/systemd/system/")" "php8.3-fpm.service.d" "web-ha: no drop-in for 8.5"
+has "$HA" "rm /etc/systemd/system/php8.3-fpm.service.d/php2shell-memory.conf && systemctl daemon-reload && systemctl restart php8.3-fpm" "web-ha: rollback line for the drop-in"
+BKA=$(sed -nE 's/^  cp (\/var\/lib\/php2shell\/backup\/www\.conf\.[0-9TZ]+) \/etc\/php\/8\.3\/fpm\/pool\.d\/www\.conf .*/\1/p' <<<"$HA")
+eq "$(cat "$WORK/hosts/web-ha/root$BKA" 2>/dev/null)" "$POOL0" "web-ha: rollback line copies back the pool file as it was"
+TA=$(tree web-ha)
+: >"$STUB_LOG"
+HA2=$(bash "$S/run.sh" harden web-ha); code=$?
+eq "$code" 0 "web-ha rerun: exit 0"
+eq "$(tree web-ha)" "$TA" "web-ha rerun: nothing written"
+eq "$(grep -cE '^systemctl (restart|daemon-reload)' "$STUB_LOG")" 0 "web-ha rerun: nothing restarted or reloaded"
+has "$HA2" "branch=8.3 sapi=fpm memory_limit=-1 max_requests=1 memory_max=75% state=unchanged" "web-ha rerun: unchanged"
+HAA=$(bash "$S/run.sh" audit web-ha)
+has "$HAA" "kind=harden host=web-ha branch=8.3 sapi=fpm memory_limit=-1 max_requests=1 memory_max=75% state=in-place" "audit: harden in place"
+eq "$(grep -c 'kind=harden' <<<"$HAA")" 1 "audit: no harden record for the SAPI without it"
+has "$(bash "$S/report.sh" "$(sed -n 's/^log: //p' <<<"$HAA")")" "| 8.3 | fpm | -1 | 1 | 75% | in-place |" "report: harden table"
+eq "$(grep -c 'kind=harden' <<<"$MA")" 0 "web-m (never hardened): no harden record"
+
+POOLB=$(cat "$WORK/hosts/web-hb/root/etc/php/8.3/fpm/pool.d/www.conf")
+: >"$STUB_LOG"
+HB=$(bash "$S/run.sh" harden web-hb); code=$?
+eq "$code" 1 "web-hb: failing php-fpm -t -> exit 1"
+eq "$(cat "$WORK/hosts/web-hb/root/etc/php/8.3/fpm/pool.d/www.conf")" "$POOLB" "web-hb: pool file put back"
+eq "$(grep -c '^systemctl restart' "$STUB_LOG")" 0 "web-hb: nothing restarted"
+[ -e "$WORK/hosts/web-hb/root/etc/systemd/system/php8.3-fpm.service.d/php2shell-memory.conf" ] && bad "web-hb: no drop-in" || ok "web-hb: no drop-in"
+has "$HB" "state=test-failed" "web-hb: recorded"
+hasnt "$HB" "cp /var/lib/php2shell/backup/www.conf" "web-hb: no rollback line for a change already undone"
+
+HC=$(bash "$S/run.sh" harden web-hc); code=$?
+eq "$code" 0 "web-hc: exit 0"
+has "$HC" "php8.3-fpm already has MemoryMax=2147483648: left alone" "web-hc: the unit's own MemoryMax reported"
+has "$HC" "WARNING: php8.3-fpm has LimitAS=4294967296" "web-hc: an RLIMIT on the unit reported"
+[ -e "$WORK/hosts/web-hc/root/etc/systemd/system/php8.3-fpm.service.d/php2shell-memory.conf" ] && bad "web-hc: not overwritten by a drop-in" || ok "web-hc: not overwritten by a drop-in"
+has "$HC" "memory_max=existing:2147483648 state=hardened" "web-hc: pools hardened, MemoryMax recorded as the unit's"
+
+: >"$STUB_LOG"
+HD=$(P2S_MEMORY_MAX=4G bash "$S/run.sh" harden web-hd); code=$?
+eq "$code" 0 "web-hd: FPM and mod_php hardened, exit 0"
+has "$(cat "$WORK/hosts/web-hd/root/etc/apache2/conf-available/php2shell-harden.conf" 2>/dev/null)" "php_admin_value memory_limit -1" "web-hd: Apache conf written"
+[ -L "$WORK/hosts/web-hd/root/etc/apache2/conf-enabled/php2shell-harden.conf" ] && ok "web-hd: conf enabled" || bad "web-hd: conf enabled"
+has "$(cat "$STUB_LOG")" "apachectl configtest" "web-hd: Apache config tested"
+has "$(cat "$WORK/hosts/web-hd/root/etc/systemd/system/apache2.service.d/php2shell-memory.conf" 2>/dev/null)" "MemoryMax=4G" "web-hd: P2S_MEMORY_MAX reaches the host"
+has "$HD" "prefork has no per-request recycling" "web-hd: says so for mod_php"
+has "$HD" "branch=8.3 sapi=apache2 memory_limit=-1 max_requests=- memory_max=4G state=hardened" "web-hd: mod_php record"
+eq "$(grep -c '^systemctl restart apache2' "$STUB_LOG")" 1 "web-hd: Apache restarted once"
+eq "$(P2S_MEMORY_MAX='75%;x' bash "$S/run.sh" harden web-hd 2>&1; echo "rc=$?")" "$(printf 'P2S_MEMORY_MAX must be a percentage (75%%) or a size (4G), not: 75%%;x\nrc=2')" \
+  "harden: a malformed P2S_MEMORY_MAX never reaches a host"
+
 echo "▸ fix"
 state() { echo "$WORK/hosts/$1/root/var/lib/php2shell"; }
 : >"$STUB_LOG"
@@ -1672,7 +1752,6 @@ mv "$WORK/web-m.ubuntu" "$WORK/hosts/web-m"
 
 echo "▸ autoupdate"
 # A host's whole tree, directories included: the keeper must not even create one where it has nothing to do.
-tree() { (cd "$WORK/hosts/$1" && find . -type d | sort && find . -type f -exec md5sum {} + | sort); }
 yreset() { rm -rf "$WORK/hosts/web-y"; cp -r "$WORK/web-y.pristine" "$WORK/hosts/web-y"; }
 y() { echo "$WORK/hosts/web-y/root$1"; }
 PIN83=/etc/apt/preferences.d/php2shell-php8.3.pref
