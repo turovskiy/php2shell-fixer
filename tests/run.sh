@@ -160,7 +160,9 @@ stub() { # stub <name> <body>: a logging stub
   printf '#!/usr/bin/env bash\necho "%s $*" >>"$STUB_LOG"\n%s\n' "$1" "$2" >"$WORK/bin/$1"
   chmod +x "$WORK/bin/$1"
 }
-# ssh [-o opt]... <host> 'bash -s': the host is the second-to-last argument. A host with a "sleep" file
+# ssh [-o opt]... <host> 'bash -s': the host is the second-to-last argument. Like sshd (do_child restores
+# SIGPIPE), the program starts with SIGPIPE at its default action, even where the test itself runs with it
+# ignored (a GitHub Actions step does). A host with a "sleep" file
 # waits that many seconds first, to exercise the per-host timeout. A host with a "drop-after" file loses the
 # connection after that many seconds the hard way: the whole session's process group gets SIGHUP and then
 # SIGKILL, children included (255), as from a session with a pty or an operator's kill. Only what left the
@@ -176,7 +178,7 @@ d=$P2S_TEST_HOSTS/$h
 [ -d "$d" ] || { echo "ssh: Could not resolve hostname $h: Name or service not known" >&2; exit 255; }
 [ -f "$d/sleep" ] && sleep "$(cat "$d/sleep")"
 if [ -f "$d/drop-after" ]; then
-  P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h setsid bash -s <&0 &
+  P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h setsid env --default-signal=PIPE bash -s <&0 &
   pid=$!
   sleep "$(cat "$d/drop-after")"
   kill -HUP -- "-$pid" 2>/dev/null; sleep 0.2; kill -9 -- "-$pid" 2>/dev/null
@@ -186,17 +188,17 @@ fi
 if [ -f "$d/close-in-uu" ]; then
   # The reader writes its own pid: $! after a process substitution is not the reader on every bash.
   exec 3> >(sh -c "echo \$\$ >\"\$1\"; exec cat" _ "$d/reader.pid")
-  P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h bash -s >&3 2>&3 3>&-
+  P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h env --default-signal=PIPE bash -s >&3 2>&3 3>&-
   exec 3>&-
   echo "Connection to $h closed by remote host." >&2
   exit 255
 fi
 if [ -f "$d/fsize-limit" ]; then
   set -o pipefail
-  (trap "" XFSZ; ulimit -f "$(cat "$d/fsize-limit")"; P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h exec bash -s) | cat
+  (trap "" XFSZ; ulimit -f "$(cat "$d/fsize-limit")"; P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h exec env --default-signal=PIPE bash -s) | cat
   exit
 fi
-P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h exec bash -s'
+P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h exec env --default-signal=PIPE bash -s'
 stub hostname 'echo "$STUB_HOST"'
 # dpkg-query -W -f=<format> <package>...: fixture lines are "<status>|<package>|<version>[|<source>]".
 # A ${source:Package} format prints "<status>|<package>|<source>", the source defaulting to php<X.Y> as for
