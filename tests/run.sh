@@ -123,6 +123,22 @@ derive web-pg downloadable.txt "$(cat "$WORK/hosts/web-m/downloadable.txt")"   #
 for s in 20261001T000000000Z 20261002T000000000Z 20261003T000000000Z; do
   mkdir -p "$WORK/hosts/web-pg/root/var/lib/php2shell/debs-$s/php8.3"
 done
+# Per-request overrides on web-m's 8.3 pool: nginx PHP_VALUE on (web-qa) or off (web-qb), .user.ini under the
+# site's root (web-qc).
+NGXSITE='server {
+    server_name shop.example.com;
+    root /var/www/shop;
+    location ~ \.php$ {
+        fastcgi_param PHP_VALUE "upload_max_filesize=20M\nsession.upload_progress.enabled=UP";
+        fastcgi_pass unix:/run/php/php8.3-fpm.sock;
+    }
+}'
+derive web-qa root/etc/nginx/sites-enabled/shop "${NGXSITE/UP/1}"
+derive web-qb root/etc/nginx/sites-enabled/shop "${NGXSITE/UP/0}"
+derive web-qc root/var/www/shop/.user.ini 'session.upload_progress.enabled = On'
+sed 's/fastcgi_param PHP_VALUE.*$//' <<<"$NGXSITE" >"$WORK/hosts/web-qc/root/etc/nginx/sites-enabled/shop"
+for d in a b c; do mkdir -p "$WORK/hosts/web-qc/root/var/www/shop/wp-content/$d"
+  printf 'session.upload_progress.enabled = Off\n' >"$WORK/hosts/web-qc/root/var/www/shop/wp-content/$d/.user.ini"; done
 derive web-pd root/var/lib/php2shell/policy-rc.d.kept "$OWNRCD"   # a run killed (SIGKILL) mid-install left ours
 OURRCD=$'#!/bin/sh\n# php2shell-fixer: no service actions during the patch install; removed after it\nexit 101'
 mkdir -p "$WORK/hosts/web-pd/root/usr/sbin" && printf '%s\n' "$OURRCD" >"$WORK/hosts/web-pd/root/usr/sbin/policy-rc.d"
@@ -767,6 +783,31 @@ $(yes_no p2s_listen_matches 127.0.0.1:9000 localhost:9000) \
 $(yes_no p2s_listen_matches 127.0.0.1:9000 127.0.0.1:9001) \
 $(yes_no p2s_listen_matches 10.0.0.5:9000 127.0.0.1:9000)" \
   "yes no yes yes no no" "listen vs fastcgi_pass: /var/run is /run, bare port, loopback names, port and address mismatch"
+# nginx per-request PHP settings: file and line from the dump's headers, a value spread over lines or joined
+# by "\n", an upstream resolved, a snippet outside any server ("*"), a server without fastcgi_pass left out.
+NGXDUMP='# configuration file /etc/nginx/nginx.conf:
+http {
+  fastcgi_param PHP_VALUE "session.upload_progress.enabled=1";
+}
+
+# configuration file /etc/nginx/sites-enabled/shop:
+upstream php83 { server unix:/run/php/php8.3-fpm.sock; }
+server {
+    server_name shop.example.com;
+    root /var/www/shop;
+    location ~ \.php$ {
+      fastcgi_param PHP_VALUE "upload_max_filesize=20M
+        session.upload_progress.enabled = On";
+      fastcgi_param PHP_ADMIN_VALUE "session.upload_progress.enabled=0\nmemory_limit=1G"; # admin off
+      fastcgi_pass php83;
+    }
+}
+server { server_name static.example.org; root /var/www/static; fastcgi_param PHP_VALUE "session.upload_progress.enabled=1"; }'
+eq "$(p2s_nginx_php_settings "$NGXDUMP")" "$(printf '%s\n' 'V|/etc/nginx/nginx.conf|2|*|PHP_VALUE|1' \
+  'V|/etc/nginx/sites-enabled/shop|6|unix:/run/php/php8.3-fpm.sock|PHP_VALUE|On' \
+  'V|/etc/nginx/sites-enabled/shop|8|unix:/run/php/php8.3-fpm.sock|PHP_ADMIN_VALUE|0' \
+  'R|/var/www/shop|unix:/run/php/php8.3-fpm.sock')" \
+  "nginx PHP_VALUE: file and line, multi-line and \\n pairs, upstream, snippet, PHP-less server skipped"
 AS='AH00558: apache2: Could not reliably determine the server'"'"'s fully qualified domain name
 VirtualHost configuration:
 *:443                  is a NameVirtualHost
@@ -1096,6 +1137,10 @@ eq "$(ini web-f 8.3/apache2)" "$INI" "hook run: the new mod_php got its ini"
 has "$(cat "$HL")" "kind=mitigation host=web-f branch=8.3 sapi=apache2 ini=absent action=written-not-running upload_progress=Off" \
   "hook run: mod_php logged, Apache not running so nothing reloaded"
 
+# Every p2s_ function the hook script calls is in it: it runs alone, outside any bundle.
+missing=$(comm -23 <(grep -oE '\bp2s_[a-z0-9_]+' "$HK" | sort -u) <(grep -oE '^p2s_[a-z0-9_]+ \(\)' "$HK" | cut -d' ' -f1 | sort -u))
+eq "$missing" "" "hook script: every p2s_ function it calls is defined in it"
+
 H1=$(bash "$S/run.sh" audit web-f)
 has "$H1" "kind=ensure_hook host=web-f state=present" "audit: hook present"
 has "$A" "kind=ensure_hook host=web-a state=missing" "audit: hook missing"
@@ -1104,6 +1149,38 @@ H2=$(bash "$S/run.sh" audit web-f)
 has "$H2" "kind=ensure_hook host=web-f state=outdated" "audit: changed hook is outdated"
 H3=$(bash "$S/run.sh" ensure web-f)
 has "$H3" "kind=ensure_hook host=web-f action=updated state=present" "ensure: outdated hook rewritten"
+
+# Per-request overrides the master value cannot show: nginx PHP_VALUE and .user.ini (#31). ensure names them
+# by file and line, exits 3, and edits neither.
+QA=$(bash "$S/run.sh" audit web-qa)
+has "$QA" "kind=override host=web-qa branch=8.3 sapi=fpm file=/etc/nginx/sites-enabled/shop line=5 pool=www directive=PHP_VALUE value=1 enables=yes" \
+  "web-qa: nginx PHP_VALUE turning upload progress on is an override of the 8.3 pool"
+eq "$(grep 'kind=mitigation host=web-qa branch=8.3 sapi=fpm' <<<"$QA" | grep -c 'state=override')" 1 "web-qa: audit state=override"
+eq "$(grep -c 'kind=override host=web-qa branch=8.5' <<<"$QA")" 0 "web-qa: 8.5's pool is not that site's"
+QSITE=$(cat "$WORK/hosts/web-qa/root/etc/nginx/sites-enabled/shop")
+QE=$(bash "$S/run.sh" ensure web-qa); code=$?
+eq "$code" 3 "web-qa: ensure exits 3 on the nginx override"
+has "$QE" "php8.3 fpm: /etc/nginx/sites-enabled/shop:5 (PHP_VALUE 1) turns upload progress back on" "web-qa: ensure names file and line"
+eq "$(cat "$WORK/hosts/web-qa/root/etc/nginx/sites-enabled/shop")" "$QSITE" "web-qa: ensure leaves the nginx site as it was"
+QB=$(bash "$S/run.sh" ensure web-qb); code=$?
+eq "$code" 0 "web-qb: PHP_VALUE turning it off: ensure exit 0"
+has "$QB" "kind=override host=web-qb branch=8.3 sapi=fpm file=/etc/nginx/sites-enabled/shop line=5 pool=www directive=PHP_VALUE value=0 enables=no" \
+  "web-qb: recorded, not enabling"
+has "$QB" "branch=8.3 sapi=fpm ini=absent action=written upload_progress=Off overrides=0 state=mitigated" "web-qb: not counted"
+QC=$(bash "$S/run.sh" ensure web-qc); code=$?
+eq "$code" 3 "web-qc: ensure exits 3 on a .user.ini under the site's root"
+has "$QC" "kind=override host=web-qc branch=8.3 sapi=fpm file=/var/www/shop/.user.ini line=1 pool=www directive=user_ini value=On enables=yes" \
+  "web-qc: the .user.ini that turns it on"
+eq "$(grep -c 'kind=override host=web-qc branch=8.3 sapi=fpm file=/var/www/shop/wp-content/.*directive=user_ini value=Off enables=no' <<<"$QC")" 3 \
+  "web-qc: the deeper .user.ini files that turn it off, recorded and not counted"
+eq "$(grep -c 'kind=override host=web-qc branch=8.5' <<<"$QC")" 0 "web-qc: 8.5's pool serves no site with that root"
+# The scan stops at P2S_USERINI_CAP files per root and says so.
+QK=$(P2S_USERINI_CAP=2 bash "$S/run.sh" audit web-qc)
+eq "$(grep -c 'kind=override host=web-qc branch=8.3 sapi=fpm .*directive=user_ini value=' <<<"$QK")" 2 "web-qc capped at 2: two files read"
+has "$QK" "kind=override host=web-qc branch=8.3 sapi=fpm file=/var/www/shop line=- pool=www directive=user_ini_scan value=capped enables=unknown" \
+  "web-qc capped at 2: the cap recorded"
+has "$(bash "$S/report.sh" "$(sed -n 's/^log: //p' <<<"$QK")")" '.user.ini scan of `/var/www/shop` stopped at its file cap' "report: a capped .user.ini scan"
+has "$(bash "$S/report.sh" "$(sed -n 's/^log: //p' <<<"$QE")")" '`/etc/nginx/sites-enabled/shop:5` PHP_VALUE = 1 - **re-enables it**' "report: the nginx override"
 
 echo "▸ fix"
 state() { echo "$WORK/hosts/$1/root/var/lib/php2shell"; }
