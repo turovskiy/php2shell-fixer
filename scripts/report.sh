@@ -28,7 +28,7 @@ for log in "${logs[@]}"; do
   [ -r "$log" ] || { echo "unreadable log: $log" >&2; rc=1; }
 done
 branches=() mitigations=() overrides=() sites=() pools=() holds=() sources=() origins=() facts=() patches=() probes=()
-keeps=() klines=() gaps=() foreigns=()
+keeps=() klines=() gaps=() foreigns=() iocs=() iocfiles=()
 dec() { local v=${1//%20/ }; echo "${v//%25/%}"; }   # values were encoded with p2s_enc
 flush() { # print the current host section
   [ -n "${cur_host:-}" ] || return 0
@@ -88,6 +88,16 @@ flush() { # print the current host section
   [ ${#branches[@]} -gt 0 ] || [ ${#mitigations[@]} -gt 0 ] || [ ${#patches[@]} -gt 0 ] || [ ${#foreigns[@]} -gt 0 ] \
     || [ "$mode_seen" = fix ] \
     || [ "$mode_seen" = autoupdate ] || echo 'No PHP-FPM, mod_php or PHP-CGI installed.'
+  if [ ${#iocs[@]} -gt 0 ]; then
+    printf '\n### Indicators of compromise\n\n'
+    echo 'For review, not a verdict: a CMS update changes many PHP files, and a clean result is no proof.'
+    printf '\n| Type | Source | Count | First | Last |\n|---|---|---|---|---|\n'
+    printf '%s\n' "${iocs[@]}"
+    if [ ${#iocfiles[@]} -gt 0 ]; then
+      printf '\nNewest PHP files changed since the window:\n\n'
+      printf '%s\n' "${iocfiles[@]}"
+    fi
+  fi
   if [ ${#facts[@]} -gt 0 ]; then
     printf '\n### Host facts\n\n'
     printf '%s\n' "${facts[@]}"
@@ -111,7 +121,7 @@ flush() { # print the current host section
     printf '\nunattended-upgrades origins: %s\n' "${origins[*]}"
   fi
   branches=() mitigations=() overrides=() sites=() pools=() holds=() sources=() origins=() facts=() patches=() probes=()
-  keeps=() klines=() gaps=() foreigns=()
+  keeps=() klines=() gaps=() foreigns=() iocs=() iocfiles=()
 }
 
 echo "# PHP2Shell report"
@@ -308,6 +318,18 @@ while IFS=$'\t' read -r _ _ _ log; do
         esac
         klines+=("- Auto-update keeper: $u")
         ;;
+      ioc)
+        case ${r[type]} in
+          shell_child) io="| **shell under PHP** | ${r[source]}, pid ${r[pid]} | 1 | \`$(dec "${r[command]}")\` | |" ;;
+          new_php)
+            io="| new PHP files | \`${r[source]}\` | ${r[count]}"
+            [ "${r[capped]}" = no ] || io+=" (stopped at the cap)"
+            io+=" | ${r[first]} | ${r[last]} |" ;;
+          *) io="| crash | ${r[source]} | ${r[count]} | ${r[first]} | ${r[last]} |" ;;
+        esac
+        iocs+=("$io")
+        ;;
+      ioc_file) iocfiles+=("- ${r[mtime]} \`$(dec "${r[path]}")\`") ;;
       foreign_php)
         foreigns+=("$(printf '| `%s` | %s | %s | %s | %s |' "${r[path]}" "${r[sapi]}" "${r[source]}" "${r[version]}" "${r[running]}")")
         ;;

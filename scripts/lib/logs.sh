@@ -76,6 +76,7 @@ p2s_log_summary() { # $1 log
       else if (r["kind"] == "keeper") { keeper = r["state"]; if (r["branches"] != "") ref = r["branches"] }
       else if (r["kind"] == "policy" && r["state"] == "pin-ineffective") lp = add(lp, r["pin"])
       else if (r["kind"] == "foreign_php") fp = add(fp, r["source"] ":" r["path"])
+      else if (r["kind"] == "ioc") ioc = add(ioc, r["type"])
     }
     END {
       printf "status=%s exit=%s reached=%s unfixed=%s restart_needed=%s unmitigated=%s overrides=%s apache_overrides=%s hook=%s",
@@ -85,6 +86,6 @@ p2s_log_summary() { # $1 log
       printf " ppa=%s ppa_covered=%s keeper=%s refused=%s loose_pins=%s nofix=%s", (ppa == "" ? "no" : ppa),
         (cov == "" ? "-" : cov), (keeper == "" ? "-" : keeper), (ref == "" ? "-" : ref), (lp == "" ? "-" : lp),
         (nf == "" ? "-" : nf)
-      printf " probe=%s foreign=%s\n", (probe == "" ? "-" : probe), (fp == "" ? "-" : fp)
+      printf " probe=%s foreign=%s ioc=%s\n", (probe == "" ? "-" : probe), (fp == "" ? "-" : fp), (ioc == "" ? "-" : ioc)
     }' "$1"
 }

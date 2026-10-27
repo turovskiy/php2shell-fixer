@@ -18,3 +18,5 @@ P2S_ESM_ONLY="ubuntu-20.04 ubuntu-18.04 ubuntu-16.04 ubuntu-14.04"
 P2S_NO_FIX="debian-11"
 # Day the fixed builds were published (php.net, 2026-10-21). An apt list last changed before it cannot offer one.
 P2S_FIXES_RELEASED=2026-10-21
+# First exploitation seen in the wild: the audit's indicators of compromise look from this day on.
+P2S_EXPLOIT_SINCE=2026-10-17

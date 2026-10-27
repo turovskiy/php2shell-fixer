@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The next step per host, read from the newest saved log of each mode, so an interrupted session resumes
-# where it stopped. Steps: audit, fix, ensure, autoupdate, verify (audit again after a write), manual (a branch
-# whose release gets no free fix, or PHP outside dpkg: only the operator can close it), done.
+# where it stopped. Steps: audit, investigate (a shell under PHP, or crashes and new PHP files since exploitation
+# began), fix, ensure, autoupdate, verify (audit again after a write), manual (a branch whose release gets no
+# free fix, or PHP outside dpkg: only the operator can close it), done.
 # Usage: next.sh --latest       every run.sh log in ${P2S_CACHE:-$XDG_CACHE_HOME/php2shell}
 #        next.sh <log>...
 # Prints one "<host>: <step> - <reason>" line per host. Exit 0; 2 on bad usage or no logs.
@@ -13,7 +14,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CACHE=${P2S_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/php2shell}
 
 case ${1:-} in
-  '') sed -n '4,5s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2; exit 2 ;;
+  '') sed -n '6,7s/^# \{0,1\}//p' "${BASH_SOURCE[0]}" >&2; exit 2 ;;
   --latest) mapfile -t logs < <(p2s_cache_logs "$CACHE") ;;
   *) logs=("$@") ;;
 esac
@@ -89,6 +90,9 @@ for target in $(cut -f1 <<<"$newest" | sort -u); do
       esac
     elif [ "$a_status" = unreachable ] || [ "$a_status" = timeout ] || [ "$(word reached "$a")" = no ]; then
       step=audit reason="last audit: $a_status"
+    elif [[ ,$(word ioc "$a"), == *,shell_child,* ]] \
+      || { [[ ,$(word ioc "$a"), == *,crash,* ]] && [[ ,$(word ioc "$a"), == *,new_php,* ]]; }; then
+      step=investigate reason="indicators of compromise ($(word ioc "$a")): see the audit's Indicators; a hit means isolating and rebuilding the host and rotating every secret PHP handled, not only fix"
     elif [ "$(word unfixed "$a")" != - ]; then
       step=fix reason="unfixed: php$(word unfixed "$a" | sed 's/,/, php/g')"
     elif [ "$(word restart_needed "$a")" != - ]; then

@@ -1,13 +1,13 @@
 # shellcheck shell=bash
 # Read-only PHP2Shell audit of one host. Changes nothing.
-# Runs as the tail of the bundle from run.sh (after versions.sh, p2s.sh, mitigation.sh, hostfacts.sh,
+# Runs as the tail of the bundle from run.sh (after versions.sh, p2s.sh, mitigation.sh, hostfacts.sh, ioc.sh,
 # branch.sh):
 # run.sh audit <host>
 # Output: a human-readable section plus "@p2s" records (schema in p2s.sh): one "branch" record per PHP-FPM
 # or mod_php (SAPI apache2) branch with its verdict and target, one "candidate" record per build apt offers
 # for it, and one "mitigation" record (plus "override" records) per web SAPI, then the host facts: web
 # servers, sites and pools, PHP outside dpkg ("foreign_php"), held packages, PPA sources with their Release
-# info, unattended-upgrades.
+# info, unattended-upgrades; last the indicators of compromise ("ioc", "ioc_file").
 set -u
 export LC_ALL=C
 
@@ -146,3 +146,25 @@ while IFS= read -r o; do
   [ -n "$o" ] && p2s_record kind=uu_origin host="$host" value="$(p2s_enc "$o")"
 done <<<"$origins"
 echo "unattended-upgrades: periodic ${periodic:-unset}, ondrej PPA covered: $covered"
+
+echo "== indicators of compromise since $P2S_EXPLOIT_SINCE (for review: a clean result is no proof)"
+while IFS='|' read -r src n first last; do
+  [ -n "$src" ] || continue
+  p2s_record kind=ioc host="$host" type=crash source="$src" count="$n" first="$first" last="$last"
+  echo "crash ($src): $n since the window, first $first, last $last"
+done <<<"$(p2s_ioc_crashes "$P2S_EXPLOIT_SINCE")"
+while IFS='|' read -r pid parent args; do
+  [ -n "$pid" ] || continue
+  p2s_record kind=ioc host="$host" type=shell_child source="$parent" count=1 first=- last=- pid="$pid" command="$(p2s_enc "$args")"
+  echo "RUNNING UNDER $parent: pid $pid: $args"
+done <<<"$(p2s_ioc_shell_children)"
+while IFS='|' read -r kind a b c d e; do
+  case $kind in
+    dir)
+      p2s_record kind=ioc host="$host" type=new_php source="$a" count="$b" first="$c" last="$d" capped="$e"
+      echo "PHP files changed in $a: $b$([ "$e" = no ] || echo " (stopped at the cap)"), $c .. $d" ;;
+    file)
+      p2s_record kind=ioc_file host="$host" mtime="$a" path="$(p2s_enc "$b")"
+      echo "  $a $b" ;;
+  esac
+done <<<"$(p2s_ioc_new_php "$P2S_EXPLOIT_SINCE")"
