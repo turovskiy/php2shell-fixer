@@ -184,8 +184,8 @@ if [ -f "$d/drop-after" ]; then
   exit 255
 fi
 if [ -f "$d/close-in-uu" ]; then
-  exec 3> >(exec cat)
-  echo "$!" >"$d/reader.pid"
+  # The reader writes its own pid: $! after a process substitution is not the reader on every bash.
+  exec 3> >(sh -c "echo \$\$ >\"\$1\"; exec cat" _ "$d/reader.pid")
   P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h bash -s >&3 2>&3 3>&-
   exec 3>&-
   echo "Connection to $h closed by remote host." >&2
