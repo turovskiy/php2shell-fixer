@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Auto-update keeper: PHP from the ondrej/sury PPA keeps getting security updates from unattended-upgrades, and
 # a distro-built branch never moves to the PPA. Only on a host with the PPA configured; anywhere else it writes
 # nothing. The order is the safety:
@@ -307,7 +308,7 @@ for e in "${entries[@]}"; do
   if [[ ",$allowed," == *",o=$o,"* || ",$allowed," == *",origin=$o,"* ]]; then
     [[ " ${seen[*]} " == *" $o "* ]] || seen+=("$o")
   else
-    result=origin-missing
+    result='origin-missing'
   fi
 done
 [ "$result" != ok ] || [ ${#from_ppa[@]} -eq 0 ] || result=distro-from-ppa

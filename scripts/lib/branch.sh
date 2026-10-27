@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # One PHP branch judged on the host: its installed build, the builds apt offers, and the target. Shared
 # by audit.sh (reports it) and fix.sh (installs the target), so the patcher has no selection logic of its own.
 # Sourced after p2s.sh. Candidate .debs go into $P2S_TMP, which the caller creates and removes.
@@ -86,6 +87,7 @@ p2s_lists_date() { # $1 origin
 # BR_REASON, BR_TARGET, BR_TREASON, BR_LISTS, BR_STALE, and the arrays BR_CHUMAN (lines for people) and
 # BR_CRECORDS (one "candidate" record per build apt offers). A candidate's changelog is fetched once per run,
 # however many SAPIs of the branch ask (P2S_CVE_SEEN).
+# shellcheck disable=SC2034  # the BR_* results are read by audit.sh and fix.sh
 p2s_branch_eval() {
   local host=$1 branch=$2 ver=$3 pkg=${4:-php$2-fpm} sapi=${5:-fpm} policy offered cv co ccve cverdict creason cands=()
   declare -gA P2S_CVE_SEEN

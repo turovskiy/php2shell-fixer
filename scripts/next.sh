@@ -64,7 +64,7 @@ for target in $(cut -f1 <<<"$newest" | sort -u); do
     elif [ "$(word ppa "$a")" = yes ] && [ "$(word ppa_covered "$a")" = no ]; then
       step=autoupdate reason="the ondrej PPA is configured, but unattended-upgrades does not install PHP updates from it"
     else
-      step=done reason="every branch fixed and restarted, every web SAPI mitigated"
+      step='done' reason="every branch fixed and restarted, every web SAPI mitigated"
     fi
   fi
   echo "$target: $step - $reason"
