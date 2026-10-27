@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Auto-update keeper: PHP from the ondrej/sury PPA keeps getting security updates from unattended-upgrades, and
 # a distro-built branch never moves to the PPA. Only on a host with the PPA configured; anywhere else it writes
 # nothing. The order is the safety:
@@ -246,8 +247,10 @@ if [ ${#need[@]} -gt 0 ]; then
   for e in "${keep[@]}" "${need[@]}"; do
     [[ " ${write[*]} " == *" $e "* ]] || write+=("$e")
   done
-  # From here until the dry run's verdict the entry is unchecked. A dropped ssh session (SIGHUP) or a kill
-  # puts the file back as it was first, then reports; SIGPIPE is ignored, the session's output being gone.
+  # From here until the dry run's verdict the entry is unchecked. A dropped ssh session or a kill puts the
+  # file back as it was first, then reports. run.sh gives the session no pty, so sshd sends no SIGHUP when the
+  # client goes: the program learns of it by SIGPIPE on its next write, and the next write here is the record
+  # right after the entry. Inside the handler SIGPIPE is ignored, the session's output being gone.
   au_interrupted() {
     trap '' PIPE
     rm -f "$uc$P2S_NEW_SUFFIX"
@@ -259,7 +262,7 @@ if [ ${#need[@]} -gt 0 ]; then
     p2s_record kind=keeper host="$host" state=interrupted reason=signal
     exit 1
   }
-  trap au_interrupted HUP INT TERM
+  trap au_interrupted HUP INT TERM PIPE
   if p2s_write_file "$P2S_UU_CONF" "$(
     echo '// Managed by php2shell-fixer: unattended-upgrades installs updates from the ondrej/sury PPA.'
     echo "// Distro-built PHP branches are pinned off the PPA in $P2S_PIN_DIR/php2shell-php<X.Y>.pref."
@@ -281,7 +284,7 @@ if [ ${#need[@]} -gt 0 ]; then
       P2S_ROLLBACK+=("rm $P2S_UU_CONF   # PPA origin for unattended-upgrades")
     fi
   else
-    trap - HUP INT TERM
+    trap - HUP INT TERM PIPE
     echo "STOP: could not write $P2S_UU_CONF"
     au_end 1 state=stopped reason=origin-write-failed
   fi
@@ -307,12 +310,15 @@ for e in "${entries[@]}"; do
   if [[ ",$allowed," == *",o=$o,"* || ",$allowed," == *",origin=$o,"* ]]; then
     [[ " ${seen[*]} " == *" $o "* ]] || seen+=("$o")
   else
-    result=origin-missing
+    result='origin-missing'
   fi
 done
 [ "$result" != ok ] || [ ${#from_ppa[@]} -eq 0 ] || result=distro-from-ppa
 [ "$drc" = 0 ] || result=failed
-trap - HUP INT TERM   # the verdict is in: from here on the entry is kept or taken out below
+# The verdict is in: from here on the entry is kept or taken out below. A session gone during the dry run
+# must not stop that halfway, so a write to it fails quietly instead of ending the program.
+trap - HUP INT TERM
+trap '' PIPE
 p2s_record kind=uu_dryrun host="$host" result="$result" exit="$drc" \
   origins_allowed="$(if [ ${#seen[@]} -gt 0 ]; then IFS=,; echo "${seen[*]}"; else echo -; fi)" \
   from_ppa="$(if [ ${#from_ppa[@]} -gt 0 ]; then IFS=,; echo "${from_ppa[*]}"; else echo -; fi)"

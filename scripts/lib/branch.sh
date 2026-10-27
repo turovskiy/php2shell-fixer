@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # One PHP branch judged on the host: its installed build, the builds apt offers, and the target. Shared
 # by audit.sh (reports it) and fix.sh (installs the target), so the patcher has no selection logic of its own.
 # Sourced after p2s.sh. Candidate .debs go into $P2S_TMP, which the caller creates and removes.
@@ -81,11 +82,20 @@ p2s_lists_date() { # $1 origin
   p2s_iso "$newest"
 }
 
+# Why a distro branch has no fixed build beyond the lists: no-fix-for-release (the distro ships none for this
+# release), fix-only-in-esm (Ubuntu ships it only in ESM and no ESM source is enabled), or nothing (the lists
+# may just be old). $1 host OS as p2s_os prints it, $2 ESM source enabled (yes|no).
+p2s_release_gap() {
+  case " $P2S_NO_FIX " in *" $1 "*) echo no-fix-for-release; return ;; esac
+  case " $P2S_ESM_ONLY " in *" $1 "*) [ "$2" = yes ] || echo fix-only-in-esm ;; esac
+}
+
 # Judge one branch through one of its SAPI packages. $1 host, $2 branch, $3 installed version, $4 the SAPI's
 # package (php8.3-fpm when absent), $5 its sapi (fpm when absent). Sets BR_ORIGIN, BR_CVE, BR_VERDICT,
 # BR_REASON, BR_TARGET, BR_TREASON, BR_LISTS, BR_STALE, and the arrays BR_CHUMAN (lines for people) and
 # BR_CRECORDS (one "candidate" record per build apt offers). A candidate's changelog is fetched once per run,
 # however many SAPIs of the branch ask (P2S_CVE_SEEN).
+# shellcheck disable=SC2034  # the BR_* results are read by audit.sh and fix.sh
 p2s_branch_eval() {
   local host=$1 branch=$2 ver=$3 pkg=${4:-php$2-fpm} sapi=${5:-fpm} policy offered cv co ccve cverdict creason cands=()
   declare -gA P2S_CVE_SEEN
@@ -115,6 +125,12 @@ p2s_branch_eval() {
       cve_changelog="$ccve" verdict="$cverdict" reason="$creason" sapi="$sapi")")
   done <<<"$offered"
   read -r BR_TARGET BR_TREASON <<<"$(p2s_target "$ver" "$BR_ORIGIN" "$BR_VERDICT" "${cands[@]}")"
+  # A distro branch whose release gets no free fix: no apt-get update will ever bring one.
+  if [ "$BR_TREASON" = fixed-distro-build-not-in-cached-lists ]; then
+    local gap
+    gap=$(p2s_release_gap "$(p2s_os)" "$(p2s_esm_source)")
+    [ -z "$gap" ] || BR_TREASON=$gap
+  fi
   BR_LISTS=$(p2s_lists_date "$BR_ORIGIN")
   BR_STALE=$(p2s_lists_stale "$BR_LISTS")
 }

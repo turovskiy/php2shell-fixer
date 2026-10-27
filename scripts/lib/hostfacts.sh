@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Host facts that decide how to patch: which site runs on which FPM pool (and which sites Apache serves),
 # whether FPM restarted after the last PHP install, held packages, the ondrej/sury sources and their Release
 # info, unattended-upgrades. Read-only. Sourced after p2s.sh; used by audit.sh, fix.sh and autoupdate.sh.
@@ -99,7 +100,16 @@ p2s_fpm_pools() { # $1 branch
 }
 
 # Enabled apt sources of the ondrej/sury PPA, one "file|uri|suite" per line (one-line and deb822 format).
-p2s_php_sources() {
+p2s_php_sources() { p2s_apt_sources | awk -F'|' '$2 ~ /(ondrej|sury)/'; }
+
+# Is an Ubuntu Pro ESM source enabled (esm.ubuntu.com, Infra, Apps or Legacy)? yes | no
+p2s_esm_source() {
+  p2s_apt_sources | awk -F'|' '$2 ~ /:\/\/esm\.ubuntu\.com(\/|$)/ { f = 1 } END { print (f ? "yes" : "no") }'
+}
+
+# Every enabled apt source, one "file|uri|suite" per line, from sources.list and sources.list.d (one-line and
+# deb822 format).
+p2s_apt_sources() {
   local f
   for f in "$(p2s_path /etc/apt/sources.list)" "$(p2s_path /etc/apt/sources.list.d)"/*.list \
     "$(p2s_path /etc/apt/sources.list.d)"/*.sources; do
@@ -123,7 +133,7 @@ p2s_php_sources() {
           }' "$f"
         ;;
     esac
-  done | awk -F'|' '$2 ~ /(ondrej|sury)/'
+  done
 }
 
 # Name apt gives the cached InRelease of a source: https://ppa.launchpadcontent.net/ondrej/php/ubuntu + noble

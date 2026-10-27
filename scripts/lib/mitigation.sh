@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # CVE-2026-115560 mitigation: session.upload_progress off in every web SAPI. Shared by audit.sh (inspects)
 # and ensure.sh (writes). Sourced after p2s.sh. Covers FPM, mod_php (SAPI apache2) and CGI; CLI serves no web
 # requests.
@@ -198,7 +199,7 @@ p2s_ensure_sapi() {
         elif ! p2s_sapi_running "$branch" "$sapi"; then
           P2S_EACTION=written-not-running
         elif ! systemctl reload "$unit" </dev/null; then
-          P2S_EACTION=reload-failed
+          P2S_EACTION='reload-failed'
           P2S_RC=1
         fi
         P2S_ROLLBACK+=("rm ${ini#"${P2S_ROOT:-}"} && systemctl reload $unit")
@@ -280,6 +281,7 @@ p2s_hook_state() {
 }
 
 # Write the hook where it is missing or outdated. Sets P2S_HOOK_ACTION: installed | updated | unchanged | failed.
+# shellcheck disable=SC2034  # ensure.sh reads P2S_HOOK_ACTION
 p2s_hook_install() {
   local state s c
   state=$(p2s_hook_state)

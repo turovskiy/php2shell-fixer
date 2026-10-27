@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Auto-update keeper: apt pins that hold distro-built PHP branches off the ondrej/sury PPA, and the PPA origin in
 # the origins unattended-upgrades accepts. Sourced after p2s.sh and hostfacts.sh; used by autoupdate.sh.
 
@@ -6,6 +7,7 @@
 P2S_PIN_DIR=/etc/apt/preferences.d
 p2s_pin_file() { echo "$P2S_PIN_DIR/php2shell-php$1.pref"; }   # $1 branch
 # The origin entry. apt.conf.d takes names with no extension or ".conf"; this one has none.
+# shellcheck disable=SC2034  # read by autoupdate.sh
 P2S_UU_CONF=/etc/apt/apt.conf.d/51php2shell-ppa-origins
 
 # A file the keeper is about to overwrite is kept here first, not next to it: apt reads preferences.d and
@@ -25,7 +27,7 @@ P2S_NEW_SUFFIX=.php2shell-new
 p2s_write_file() { # $1 file, $2 content (written with a final newline)
   local f
   f=$(p2s_path "$1")
-  if mkdir -p "${f%/*}" && printf '%s\n' "$2" >"$f$P2S_NEW_SUFFIX" && mv -f "$f$P2S_NEW_SUFFIX" "$f" </dev/null; then
+  if mkdir -p "${f%/*}" && printf '%s\n' "$2" >"$f$P2S_NEW_SUFFIX" && mv -f "$f$P2S_NEW_SUFFIX" "$f"; then
     return 0
   fi
   rm -f "$f$P2S_NEW_SUFFIX"
@@ -35,7 +37,7 @@ p2s_write_file() { # $1 file, $2 content (written with a final newline)
 p2s_restore_file() {
   local f
   f=$(p2s_path "$2")
-  if cp -p "$(p2s_path "$1")" "$f$P2S_NEW_SUFFIX" && mv -f "$f$P2S_NEW_SUFFIX" "$f" </dev/null; then
+  if cp -p "$(p2s_path "$1")" "$f$P2S_NEW_SUFFIX" && mv -f "$f$P2S_NEW_SUFFIX" "$f"; then
     return 0
   fi
   rm -f "$f$P2S_NEW_SUFFIX"
@@ -47,9 +49,9 @@ p2s_restore_file() {
 # ondrej/php and packages.sury.org/php: the same people's nginx and Apache PPAs ship no PHP, and accepting
 # their origin would let unattended-upgrades move nginx or Apache to them.
 p2s_ppa_releases() {
-  local file uri suite site lists cached origin label
+  local uri suite site lists cached origin label
   lists=$(p2s_path /var/lib/apt/lists)
-  while IFS='|' read -r file uri suite; do
+  while IFS='|' read -r _ uri suite; do
     [ -n "$uri" ] || continue
     uri=${uri%/}
     case $uri in */ondrej/php | */ondrej/php/* | *://packages.sury.org/php | *://packages.sury.org/php/*) ;; *) continue ;; esac
@@ -142,6 +144,7 @@ p2s_pin_existing() { # $1 site, $2 origin, $3 label, $4 suite, then the branch's
       for pkg in "$@"; do
         covered=no
         for p in "${pats[@]}"; do
+          # shellcheck disable=SC2053  # unquoted on purpose: a Package: line holds glob patterns (apt_preferences(5))
           if [[ $p == /*/ ]]; then [[ $pkg =~ ${p:1:-1} ]] && covered=yes
           elif [[ $pkg == $p ]]; then covered=yes
           fi

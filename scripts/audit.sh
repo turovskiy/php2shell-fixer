@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Read-only PHP2Shell audit of one host. Changes nothing.
 # Runs as the tail of the bundle from run.sh (after versions.sh, p2s.sh, mitigation.sh, hostfacts.sh,
 # branch.sh):

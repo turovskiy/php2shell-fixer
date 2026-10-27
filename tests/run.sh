@@ -172,30 +172,45 @@ stub() { # stub <name> <body>: a logging stub
   printf '#!/usr/bin/env bash\necho "%s $*" >>"$STUB_LOG"\n%s\n' "$1" "$2" >"$WORK/bin/$1"
   chmod +x "$WORK/bin/$1"
 }
-# ssh [-o opt]... <host> 'bash -s': the host is the second-to-last argument. A host with a "sleep" file
+# ssh [-o opt]... <host> 'bash -s': the host is the second-to-last argument. Like sshd (do_child restores
+# SIGPIPE), the program starts with SIGPIPE at its default action, even where the test itself runs with it
+# ignored (a GitHub Actions step does). A host with a "sleep" file
 # waits that many seconds first, to exercise the per-host timeout. A host with a "drop-after" file loses the
-# connection after that many seconds: like sshd on a dropped session, the whole session's process group
-# gets SIGHUP and then SIGKILL, children included (255). Only what left the session survives. A host with an
+# connection after that many seconds the hard way: the whole session's process group gets SIGHUP and then
+# SIGKILL, children included (255), as from a session with a pty or an operator's kill. Only what left the
+# session survives. A host with an
 # "fsize-limit" file runs the program with files capped at that many KiB and SIGXFSZ ignored: a write past
 # the cap fails part-way with an error, as on a full disk (output goes through a pipe, which the cap spares).
+# A host with a "close-in-uu" file loses its session with no signal, as when an ssh client goes away from a
+# session without a pty: the program's output runs through a reader whose pid goes to reader.pid, the
+# unattended-upgrade stub kills that reader during the dry run the file names, and the program learns of it
+# only by SIGPIPE on its next write (255).
 stub ssh 'h=${@: -2:1}
 d=$P2S_TEST_HOSTS/$h
 [ -d "$d" ] || { echo "ssh: Could not resolve hostname $h: Name or service not known" >&2; exit 255; }
 [ -f "$d/sleep" ] && sleep "$(cat "$d/sleep")"
 if [ -f "$d/drop-after" ]; then
-  P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h setsid bash -s <&0 &
+  P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h setsid env --default-signal=PIPE bash -s <&0 &
   pid=$!
   sleep "$(cat "$d/drop-after")"
   kill -HUP -- "-$pid" 2>/dev/null; sleep 0.2; kill -9 -- "-$pid" 2>/dev/null
   echo "Connection to $h closed by remote host." >&2
   exit 255
 fi
+if [ -f "$d/close-in-uu" ]; then
+  # The reader writes its own pid: $! after a process substitution is not the reader on every bash.
+  exec 3> >(sh -c "echo \$\$ >\"\$1\"; exec cat" _ "$d/reader.pid")
+  P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h env --default-signal=PIPE bash -s >&3 2>&3 3>&-
+  exec 3>&-
+  echo "Connection to $h closed by remote host." >&2
+  exit 255
+fi
 if [ -f "$d/fsize-limit" ]; then
   set -o pipefail
-  (trap "" XFSZ; ulimit -f "$(cat "$d/fsize-limit")"; P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h exec bash -s) | cat
+  (trap "" XFSZ; ulimit -f "$(cat "$d/fsize-limit")"; P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h exec env --default-signal=PIPE bash -s) | cat
   exit
 fi
-P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h exec bash -s'
+P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h exec env --default-signal=PIPE bash -s'
 stub hostname 'echo "$STUB_HOST"'
 # dpkg-query -W -f=<format> <package>...: fixture lines are "<status>|<package>|<version>[|<source>]".
 # A ${source:Package} format prints "<status>|<package>|<source>", the source defaulting to php<X.Y> as for
@@ -397,7 +412,8 @@ for p; do stub_policy "$p"; done'
 # config with ${distro_id} and ${distro_codename} filled in, then the packages it would upgrade: those of
 # uu-upgrades.txt ("<Release Origin> <package>", what this unattended-upgrades would take from which origin)
 # whose origin it accepts, on one "Packages that will be upgraded:" line. fail-uu makes it fail; slow-uu makes
-# it take that many seconds once it accepts the ondrej PPA.
+# it take that many seconds once it accepts the ondrej PPA. close-in-uu ("pre" or "post": before or after it
+# accepts the ondrej PPA) kills the ssh session's reader during that dry run and waits until it is gone.
 stub unattended-upgrade 'cat >/dev/null
 [ -e "$P2S_STUB/fail-uu" ] && { echo "E: unattended-upgrade: apt_pkg.Error: E:Unable to parse package file"; exit 1; }
 . "$P2S_STUBLIB/apt.sh"
@@ -406,7 +422,12 @@ allowed=$(stub_aptconf_dump | sed -nE "s/^Unattended-Upgrade::Allowed-Origins:: 
   | sed "s/\${distro_id}/Ubuntu/g; s/\${distro_codename}/$code/g" | paste -sd, - | sed "s/,o=/, o=/g; s/,origin=/, origin=/g")
 echo "Starting unattended upgrades script"
 echo "Allowed origins are: $allowed"
-case ", $allowed," in *", o=LP-PPA-ondrej-php,"*) [ -f "$P2S_STUB/slow-uu" ] && sleep "$(cat "$P2S_STUB/slow-uu")" ;; esac
+case ", $allowed," in *", o=LP-PPA-ondrej-php,"*) when=post; [ -f "$P2S_STUB/slow-uu" ] && sleep "$(cat "$P2S_STUB/slow-uu")" ;; *) when=pre ;; esac
+if [ "$(cat "$P2S_STUB/close-in-uu" 2>/dev/null)" = "$when" ]; then
+  r=$(cat "$P2S_STUB/reader.pid")
+  kill "$r"
+  for _ in $(seq 50); do kill -0 "$r" 2>/dev/null || break; sleep 0.1; done
+fi
 up=()
 while read -r o p; do
   case ", $allowed," in *", o=$o,"* | *", origin=$o,"*) up+=("$p") ;; esac
@@ -628,10 +649,27 @@ eq "$(REL=26.10 vd 8.5 8.5.9-0ubuntu2 no)" "unfixed below-threshold" \
   "Ubuntu 26.10 8.5.9-0ubuntu2 unfixed, though above 26.04's fixed 8.5.4-0ubuntu1.5"
 eq "$(REL=26.10 vd 8.5 8.5.9-0ubuntu2.1 no)" "fixed distro-threshold" "Ubuntu 26.10 8.5 2.1 fixed"
 eq "$(REL=22.04 vd 8.3 8.3.6-0ubuntu0.24.04.13 no)" "unfixed below-threshold" "24.04's 8.3 threshold does not apply on 22.04"
-eq "$(P2S_ROOT=$WORK/no-such-root P2S_RELEASE= p2s_verdict 8.3 8.3.6-0ubuntu0.24.04.13 distro no)" "unfixed below-threshold" \
+eq "$(P2S_ROOT=$WORK/no-such-root P2S_RELEASE='' p2s_verdict 8.3 8.3.6-0ubuntu0.24.04.13 distro no)" "unfixed below-threshold" \
   "no os-release: no distro threshold"
-eq "$(P2S_ROOT=$WORK/hosts/web-e/root P2S_RELEASE= p2s_release) $(P2S_ROOT=$WORK/hosts/web-c/root P2S_RELEASE= p2s_release)" "22.04 12" \
+eq "$(P2S_ROOT=$WORK/hosts/web-e/root P2S_RELEASE='' p2s_release) $(P2S_ROOT=$WORK/hosts/web-c/root P2S_RELEASE='' p2s_release)" "22.04 12" \
   "release from the host's os-release"
+eq "$(REL=20.04 vd 7.4 7.4.3-4ubuntu2.29+esm5 no)" "fixed distro-threshold" "Ubuntu 20.04 ESM build esm5 fixed"
+eq "$(REL=20.04 vd 7.4 7.4.3-4ubuntu2.29+esm4 no)" "unfixed below-threshold" "Ubuntu 20.04 ESM build esm4 unfixed"
+eq "$(REL=18.04 vd 7.2 7.2.24-0ubuntu0.18.04.17+esm14 no)" "fixed distro-threshold" "Ubuntu 18.04 ESM build esm14 fixed"
+# shellcheck source=../scripts/lib/branch.sh
+. "$S/lib/branch.sh"
+eq "$(p2s_release_gap debian-11 no)|$(p2s_release_gap ubuntu-20.04 no)|$(p2s_release_gap ubuntu-20.04 yes)|$(p2s_release_gap ubuntu-24.04 no)|$(p2s_release_gap debian-12 no)" \
+  "no-fix-for-release|fix-only-in-esm|||" "release gap: Debian 11 none, 20.04 ESM only without ESM, supported releases none"
+E1=$WORK/esm-roots
+mkdir -p "$E1/a/etc/apt/sources.list.d" "$E1/b/etc/apt/sources.list.d" "$E1/c/etc/apt/sources.list.d" "$E1/d/etc/apt"
+printf '%s\n' 'Types: deb' 'URIs: https://esm.ubuntu.com/infra/ubuntu' 'Suites: focal-infra-security' 'Components: main' \
+  >"$E1/a/etc/apt/sources.list.d/ubuntu-esm-infra.sources"
+echo 'deb https://esm.ubuntu.com/apps/ubuntu focal-apps-security main' >"$E1/b/etc/apt/sources.list.d/ubuntu-esm-apps.list"
+printf '%s\n' 'Types: deb' 'URIs: https://esm.ubuntu.com/infra/ubuntu' 'Suites: focal-infra-security' 'Components: main' 'Enabled: no' \
+  >"$E1/c/etc/apt/sources.list.d/ubuntu-esm-infra.sources"
+echo 'deb http://archive.ubuntu.com/ubuntu focal main' >"$E1/d/etc/apt/sources.list"
+eq "$(P2S_ROOT=$E1/a p2s_esm_source) $(P2S_ROOT=$E1/b p2s_esm_source) $(P2S_ROOT=$E1/c p2s_esm_source) $(P2S_ROOT=$E1/d p2s_esm_source)" \
+  "yes yes no no" "ESM source: deb822 and one-line count, a disabled one and the archive do not"
 eq "$(vd 8.0 1:8.0.30-9+ubuntu24.04.1+deb.sury.org+1 missing)" "unfixed no-cve-in-changelog" "missing changelog is not a fix"
 eq "$(p2s_origin 8.3.6-0ubuntu0.24.04.13) $(p2s_origin 1:7.4.33-31+ubuntu24.04.1+deb.sury.org+1) $(p2s_origin 8.2.29-1~deb12u1) $(p2s_origin 8.3.36-1)" \
   "distro ppa distro other" "origin: Ubuntu, sury, Debian, other"
@@ -1155,7 +1193,7 @@ eq "$code" 3 "web-t: HTTP status changed -> exit 3"
 has "$Tt" "shop.example.com: 200 -> 502" "web-t: names the site"
 has "$Tt" "kind=probe_summary host=web-t state=changed" "web-t: recorded"
 
-S1=$(bash "$S/run.sh" fix web-s 2>&1); code=$?
+bash "$S/run.sh" fix web-s >/dev/null 2>&1; code=$?
 eq "$code" 255 "web-s: connection dropped mid-upgrade"
 for i in $(seq 1 60); do ls "$(state web-s)"/*.exit >/dev/null 2>&1 && break; sleep 0.25; done
 eq "$(cat "$(state web-s)"/*.exit 2>/dev/null)" 0 "web-s: the unit ran to its end after the drop"
@@ -1166,7 +1204,7 @@ has "$S2" "finished while nobody was watching; its log follows. No new patch was
 has "$S2" "state=fixed" "web-s: the log shows the fix"
 eq "$(ls "$WORK/hosts/web-s/units/" | wc -l)" 1 "web-s: one patch unit only"
 
-U1=$(bash "$S/run.sh" fix web-u 2>&1); code=$?
+bash "$S/run.sh" fix web-u >/dev/null 2>&1; code=$?
 eq "$code" 255 "web-u: connection dropped mid-upgrade"
 rm "$WORK/hosts/web-u/drop-after"
 U2=$(bash "$S/run.sh" fix web-u); code=$?
@@ -1308,6 +1346,67 @@ touch -d '2026-10-24 06:00:00 UTC' "$WORK/hosts/web-m/root/var/lib/apt/lists/sec
 SA=$(P2S_CACHE=$WORK/cache-deb bash "$S/run.sh" audit web-m)
 has "$SA" "branch=8.5 sapi=fpm installed=8.5.9-0ubuntu2 origin=distro active=active cve_changelog=no verdict=unfixed reason=below-threshold target=none target_reason=fixed-distro-build-not-in-cached-lists" \
   "Ubuntu 26.10: 8.5.9-0ubuntu2 unfixed, though above 26.04's fixed 8.5.4-0ubuntu1.5"
+
+echo "▸ releases without a free fix"
+# web-m as a distro php7.4 host on a release that gets no free fix: Debian 11 (none at all) and Ubuntu 20.04
+# (only in Ubuntu Pro's ESM pockets). Logs go to their own cache, so next.sh reads only these runs.
+old74() { # old74 <id> <version_id> <codename> <installed> <source uri> <suite/component>
+  rm -rf "$WORK/hosts/web-m"
+  cp -a "$WORK/web-m.ubuntu" "$WORK/hosts/web-m"
+  local m=$WORK/hosts/web-m
+  rm -rf "$m/debs" "$m/madison"/* "$m/root/usr/share/doc"/* "$m/root/var/lib/apt/lists" "$m/root/etc/php/8.5"
+  mv "$m/root/etc/php/8.3" "$m/root/etc/php/7.4"
+  sed -i 's/8\.3/7.4/' "$m/root/etc/php/7.4/fpm/pool.d/www.conf" "$m/root/etc/nginx/sites-enabled/shop"
+  printf '%s\n' "VERSION_ID=\"$2\"" "VERSION_CODENAME=$3" "ID=$1" >"$m/root/etc/os-release"
+  printf 'ii |%s|%s\n' php7.4-fpm "$4" php7.4-common "$4" php7.4-cli "$4" >"$m/dpkg-query.txt"
+  echo php7.4-fpm >"$m/active.txt"
+  printf ' php7.4-fpm | %s | %s amd64 Packages\n' "$4" "$5 $6" >"$m/madison/php7.4-fpm.txt"
+  mkdir -p "$m/root/usr/share/doc/php7.4-common" "$m/root/var/lib/apt/lists" "$m/root/etc/apt/sources.list.d"
+  printf '%s\n' "php7.4 ($4) $3; urgency=medium" '  * Security update' \
+    | gzip -n >"$m/root/usr/share/doc/php7.4-common/changelog.Debian.gz"
+  echo "deb $5 ${6%%/*} ${6#*/}" >"$m/root/etc/apt/sources.list"
+  local u=${5#*://}
+  touch -d '2026-10-24 06:00:00 UTC' "$m/root/var/lib/apt/lists/${u//\//_}_dists_${6%%/*}_${6#*/}_binary-amd64_Packages"
+}
+NF=$WORK/cache-nofix
+old74 debian 11 bullseye 7.4.33-1+deb11u10 http://deb.debian.org/debian bullseye/main
+NA=$(P2S_CACHE=$NF bash "$S/run.sh" audit web-m)
+has "$NA" "branch=7.4 sapi=fpm installed=7.4.33-1+deb11u10 origin=distro active=active cve_changelog=no verdict=unfixed reason=no-cve-in-changelog target=none target_reason=no-fix-for-release" \
+  "Debian 11: distro php7.4 has no fix to install, and the reason says so"
+NR=$(bash "$S/report.sh" "$(ls "$NF"/web-m-audit-*.log | tail -1)")
+has "$NR" '| none (no-fix-for-release) | 2026-10-24 |' "report: no-fix branch shows its reason, lists not flagged"
+has "$NR" '- **php7.4 fpm: debian-11 ships no fix**; `apt-get update` will not bring one.' "report: no-fix note under the table"
+NN=$(bash "$S/next.sh" "$(ls "$NF"/web-m-audit-*.log | tail -1)")
+hasnt "$NN" "web-m: fix" "next: a no-fix branch does not send the host to fix"
+hasnt "$NN" "apt-get update" "next: a no-fix branch never suggests apt-get update"
+NFX=$(P2S_CACHE=$NF bash "$S/run.sh" fix web-m); code=$?
+eq "$code" 3 "Debian 11 fix: mitigated only -> exit 3"
+has "$NFX" "kind=fix host=web-m branch=7.4 before=7.4.33-1+deb11u10 after=7.4.33-1+deb11u10 target=none fixed=no restart=not-needed modules=same state=unfixed-mitigated sapi=fpm target_reason=no-fix-for-release" \
+  "Debian 11 fix: the fix record carries the no-fix reason"
+NN=$(P2S_CACHE=$NF bash "$S/next.sh" --latest)
+has "$NN" "web-m: verify - fix finished after the last audit" "next: a fix left with only no-fix branches is finished, not repeated"
+P2S_CACHE=$NF bash "$S/run.sh" ensure web-m >/dev/null
+P2S_CACHE=$NF bash "$S/run.sh" audit web-m >/dev/null
+NN=$(P2S_CACHE=$NF bash "$S/next.sh" --latest)
+has "$NN" "web-m: manual - mitigated, but no patch can close it here: php7.4: the distro ships no fix for this release" \
+  "next: mitigated no-fix host -> manual, with what closes it"
+old74 ubuntu 20.04 focal 7.4.3-4ubuntu2.29 http://archive.ubuntu.com/ubuntu focal-updates/universe
+EA=$(P2S_CACHE=$WORK/cache-esm bash "$S/run.sh" audit web-m)
+has "$EA" "branch=7.4 sapi=fpm installed=7.4.3-4ubuntu2.29 origin=distro active=active cve_changelog=no verdict=unfixed reason=below-threshold target=none target_reason=fix-only-in-esm" \
+  "Ubuntu 20.04 without ESM: the fix is only in Ubuntu Pro ESM"
+ER=$(bash "$S/report.sh" "$(ls "$WORK"/cache-esm/web-m-audit-*.log | tail -1)")
+has "$ER" '- **php7.4 fpm: ubuntu-20.04 gets the fix only from Ubuntu Pro ESM** (USN-8948-2)' "report: ESM-only note under the table"
+ESM=7.4.3-4ubuntu2.29+esm5
+printf '%s\n' 'Types: deb' 'URIs: https://esm.ubuntu.com/infra/ubuntu' 'Suites: focal-infra-security focal-infra-updates' \
+  'Components: main' >"$WORK/hosts/web-m/root/etc/apt/sources.list.d/ubuntu-esm-infra.sources"
+printf ' php7.4-fpm | %s | %s\n' "$ESM" 'https://esm.ubuntu.com/infra/ubuntu focal-infra-security/main amd64 Packages' \
+  >>"$WORK/hosts/web-m/madison/php7.4-fpm.txt"
+touch -d '2026-10-24 06:00:00 UTC' "$WORK/hosts/web-m/root/var/lib/apt/lists/esm.ubuntu.com_infra_ubuntu_dists_focal-infra-security_main_binary-amd64_Packages"
+EA=$(P2S_CACHE=$WORK/cache-esm bash "$S/run.sh" audit web-m)
+has "$EA" "kind=candidate host=web-m branch=7.4 version=$ESM origin=distro cve_changelog=download-failed verdict=fixed reason=distro-threshold" \
+  "Ubuntu 20.04 with ESM: the ESM build is fixed by the 20.04 threshold"
+has "$EA" "installed=7.4.3-4ubuntu2.29 origin=distro active=active cve_changelog=no verdict=unfixed reason=below-threshold target=$ESM target_reason=fixed-candidate" \
+  "Ubuntu 20.04 with ESM: target is the ESM build"
 rm -rf "$WORK/hosts/web-m"
 mv "$WORK/web-m.ubuntu" "$WORK/hosts/web-m"
 
@@ -1542,8 +1641,8 @@ AK=$(bash "$S/run.sh" autoupdate web-y); code=$?
 has "$AK" "kind=pin host=web-y branch=8.3 file=$PIN83 action=written" "web-y with a leftover temp pin: the pin is written, not taken as present"
 eq "$(ls "$(y /etc/apt/preferences.d)")" "php2shell-php8.3.pref" "web-y with a leftover temp pin: the temp file replaced"
 
-# The connection drops while the dry run judges the new origin entry: like sshd, the ssh stub sends the session
-# SIGHUP and then SIGKILL. The keeper puts the entry back as it was before it goes, so no unchecked entry stays.
+# The session is killed while the dry run judges the new origin entry: the ssh stub sends it SIGHUP and then
+# SIGKILL. The keeper puts the entry back as it was before it goes, so no unchecked entry stays.
 for prev in no old; do
   yreset
   if [ "$prev" = old ]; then mkdir -p "$(y /etc/apt/apt.conf.d)"; printf '%s\n' "$OLDUU" >"$(y $UUC)"; fi
@@ -1561,6 +1660,41 @@ for prev in no old; do
       || ok "web-y drop during the dry run (no entry before): the entry is removed again"
   fi
 done
+
+# The same drop as it comes without a pty: no signal, the session's reader is gone. The client leaves during the
+# first dry run, so the program writes the entry and then meets SIGPIPE on the record right after it, inside
+# the unchecked window. The entry is put back; the record of it went nowhere.
+for prev in no old; do
+  yreset
+  if [ "$prev" = old ]; then mkdir -p "$(y /etc/apt/apt.conf.d)"; printf '%s\n' "$OLDUU" >"$(y $UUC)"; fi
+  echo pre >"$WORK/hosts/web-y/close-in-uu"
+  : >"$STUB_LOG"
+  AP=$(bash "$S/run.sh" autoupdate web-y 2>&1); code=$?
+  eq "$code" 255 "web-y session gone without a signal ($prev entry before): connection lost"
+  eq "$(grep -c '^unattended-upgrade ' "$STUB_LOG")" 1 "web-y session gone without a signal ($prev entry before): stopped before the second dry run"
+  if [ "$prev" = old ]; then
+    eq "$(cat "$(y $UUC)" 2>/dev/null)" "$OLDUU" "web-y session gone without a signal (old entry before): the old entry is back"
+  else
+    [ -e "$(y $UUC)" ] && bad "web-y session gone without a signal (no entry before): the entry is removed again" "$AP" \
+      || ok "web-y session gone without a signal (no entry before): the entry is removed again"
+  fi
+done
+# The client leaves during the second dry run: its verdict is in before the next write, so the program carries
+# on with the session gone and acts on it. One that takes a distro branch from the PPA has its entry taken out;
+# an accepted one stays, checked.
+yreset
+printf '%s\n' 'Ubuntu php8.3-common' 'LP-PPA-ondrej-php php8.3-fpm' >"$WORK/hosts/web-y/uu-upgrades.txt"
+echo post >"$WORK/hosts/web-y/close-in-uu"
+AQ=$(bash "$S/run.sh" autoupdate web-y 2>&1); code=$?
+eq "$code" 255 "web-y session gone during a failing dry run: connection lost"
+[ -e "$(y $UUC)" ] && bad "web-y session gone during a failing dry run: the entry is taken out" "$AQ" \
+  || ok "web-y session gone during a failing dry run: the entry is taken out"
+yreset
+echo post >"$WORK/hosts/web-y/close-in-uu"
+AQ=$(bash "$S/run.sh" autoupdate web-y 2>&1); code=$?
+eq "$code" 255 "web-y session gone during a passing dry run: connection lost"
+[ -f "$(y $UUC)" ] && ok "web-y session gone during a passing dry run: the checked entry stays" \
+  || bad "web-y session gone during a passing dry run: the checked entry stays" "$AQ"
 
 # The dry run fails: the origin entry it was asked to accept is taken out again, the pin stays.
 yreset

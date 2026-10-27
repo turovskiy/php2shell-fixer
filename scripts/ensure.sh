@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Keeps the CVE-2026-115560 mitigation in place: session.upload_progress off in every web SAPI (FPM, mod_php,
 # CGI) of every installed PHP branch. Writes 99-security.ini where it is missing or outdated, leaves CLI and
 # foreign files alone, and reloads only the FPM pools, or Apache for a loaded mod_php, whose config changed.
