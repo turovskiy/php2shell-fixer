@@ -176,9 +176,9 @@ stub() { # stub <name> <body>: a logging stub
 # SIGPIPE), the program starts with SIGPIPE at its default action, even where the test itself runs with it
 # ignored (a GitHub Actions step does). A host with a "sleep" file
 # waits that many seconds first, to exercise the per-host timeout. A host with a "drop-after" file loses the
-# connection after that many seconds the hard way: the whole session's process group gets SIGHUP and then
-# SIGKILL, children included (255), as from a session with a pty or an operator's kill. Only what left the
-# session survives. A host with an
+# connection after that many seconds the hard way: the whole session's process group gets SIGHUP and, a
+# second later, SIGKILL, children included (255), as from a session with a pty or an operator's kill. Only
+# what left the session survives. A host with an
 # "fsize-limit" file runs the program with files capped at that many KiB and SIGXFSZ ignored: a write past
 # the cap fails part-way with an error, as on a full disk (output goes through a pipe, which the cap spares).
 # A host with a "close-in-uu" file loses its session with no signal, as when an ssh client goes away from a
@@ -193,7 +193,7 @@ if [ -f "$d/drop-after" ]; then
   P2S_ROOT=$d/root P2S_STUB=$d STUB_HOST=$h setsid env --default-signal=PIPE bash -s <&0 &
   pid=$!
   sleep "$(cat "$d/drop-after")"
-  kill -HUP -- "-$pid" 2>/dev/null; sleep 0.2; kill -9 -- "-$pid" 2>/dev/null
+  kill -HUP -- "-$pid" 2>/dev/null; sleep 1; kill -9 -- "-$pid" 2>/dev/null
   echo "Connection to $h closed by remote host." >&2
   exit 255
 fi
@@ -1158,7 +1158,7 @@ OWNSUM=$(rcdsum web-pa)
 PA=$(bash "$S/run.sh" fix web-pa); code=$?
 eq "$code" 0 "web-pa: fixed with a host policy-rc.d in place"
 eq "$(rcdsum web-pa)" "$OWNSUM" "web-pa: the host's policy-rc.d is back as it was"
-eq "$(ls "$(state web-pa)" | grep -c policy-rc)" 0 "web-pa: nothing left in the state directory"
+eq "$(find "$(state web-pa)" -maxdepth 1 -name 'policy-rc*' | wc -l)" 0 "web-pa: nothing left in the state directory"
 PB=$(bash "$S/run.sh" fix web-pb); code=$?
 eq "$code" 1 "web-pb: apt fails -> exit 1"
 has "$PB" "apt-get install failed" "web-pb: says so"
@@ -1171,9 +1171,10 @@ kill -TERM -- "-$(cat "$WORK/hosts/web-pc/units/"php2shell-fix-*.pid)"
 wait "$rp"
 eq "$(rcdsum web-pc)" "$OWNSUM" "web-pc: unit stopped mid-install: the host's policy-rc.d is back as it was"
 PD=$(bash "$S/run.sh" fix web-pd); code=$?
+hasnt "$PD" "is not back" "web-pd: no warning about a kept policy-rc.d"
 eq "$code" 0 "web-pd: ours left by a killed run: the next run goes ahead"
 eq "$(rcdsum web-pd)" "$OWNSUM" "web-pd: the host's policy-rc.d is back as it was"
-eq "$(ls "$(state web-pd)" | grep -c policy-rc)" 0 "web-pd: nothing left in the state directory"
+eq "$(find "$(state web-pd)" -maxdepth 1 -name 'policy-rc*' | wc -l)" 0 "web-pd: nothing left in the state directory"
 
 Q=$(bash "$S/run.sh" fix web-q); code=$?
 eq "$code" 1 "web-q: held package -> exit 1"
