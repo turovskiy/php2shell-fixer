@@ -9,9 +9,10 @@
 # SSH:   BatchMode, so keys and agent come from the operator's ssh config and nothing prompts; connect timeout
 #        P2S_CONNECT_TIMEOUT (10 s). Only the read-only audit has a per-host limit, P2S_HOST_TIMEOUT (600 s):
 #        a write mode is never cut off, because a killed session can leave apt or a reload half done.
-#        A dropped connection still ends the remote program (SIGHUP); a mode that runs apt must detach on
-#        the server itself rather than rely on this runner (fix does), and autoupdate puts its origin entry
-#        back as it was when SIGHUP comes before the dry run has judged it.
+#        ssh gets no pty, so a dropped connection sends the remote program no SIGHUP: it ends by SIGPIPE on
+#        its next write, or not at all while its output still fits the buffers. A mode that runs apt must
+#        detach on the server itself rather than rely on this runner (fix does), and autoupdate puts its
+#        origin entry back as it was when the drop (or a kill) comes before the dry run has judged it.
 # Exit:  the highest exit code among the hosts (ssh's own failures 255, a timed-out audit 124); 2 on bad usage.
 set -uo pipefail
 
