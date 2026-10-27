@@ -68,6 +68,8 @@ It stops before touching anything when a PHP package is held, when `apt-get upda
 
 The patch runs on the server as its own systemd unit, not inside your ssh session. If your connection drops halfway, apt finishes anyway. Run the same command again: it attaches to the patch that is still running, or shows you the result of the one that finished, and never starts a second patch on top. Every run backs up `/etc/php` to `/root/etc-php-<time>.tgz` and ends with the commands that undo it.
 
+Before installing, it also saves the packages it is about to replace, as `.deb` files in `/var/lib/php2shell/debs-<time>/php<X.Y>/`, so the undo command installs those files and does not depend on the Ubuntu or Debian archive: the security and updates sections keep only the newest build, so the old one is usually gone from there right after the patch. If a package cannot be downloaded, the patch rebuilds it from the installed files with `dpkg-repack` when that tool is installed. If neither works, the patch still goes on, but the summary and the report name the packages that were not saved, and the undo command for them falls back to asking apt for the old version. The last three runs' files are kept; older ones are removed when a new run saves its own.
+
 ## Keep the mitigation in place
 
 CVE-2026-115560 has no fix yet. Until PHP ships one, the protection is `session.upload_progress.enabled = 0` in every web SAPI (PHP-FPM, mod_php and PHP-CGI). This command puts it in place and keeps it there:
