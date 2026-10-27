@@ -15,6 +15,12 @@ p2s_os() {
   if [ -n "$id$ver" ]; then echo "$id-$ver"; else echo unknown; fi
 }
 
+# Host release as VERSION_ID from os-release (24.04, 13), or nothing. P2S_RELEASE, when set, stands in for it.
+p2s_release() {
+  if [ -n "${P2S_RELEASE:-}" ]; then echo "$P2S_RELEASE"; return; fi
+  sed -nE 's/^VERSION_ID="?([^"]*)"?$/\1/p' "$(p2s_path /etc/os-release)" 2>/dev/null | head -1
+}
+
 # UTC ISO time of a Unix timestamp, or unknown for an empty one.
 p2s_iso() {
   if [ -n "${1:-}" ]; then date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; else echo unknown; fi
@@ -109,8 +115,9 @@ p2s_changelog_has_cves() {
 p2s_verdict() {
   local branch=$1 ver=$2 origin=$3 cve=$4
   local upstream=${P2S_UPSTREAM_FIXED[$branch]:-} ubuntu=""
-  # The Ubuntu threshold applies only to an Ubuntu build; a sury version string also contains "ubuntu".
-  [ "$origin" = distro ] && [[ $ver == *ubuntu* ]] && ubuntu=${P2S_UBUNTU_FIXED[$branch]:-}
+  # The Ubuntu threshold applies only to an Ubuntu build (a sury version string also contains "ubuntu"), and
+  # only the one for this host's release: no release, no distro threshold.
+  [ "$origin" = distro ] && [[ $ver == *ubuntu* ]] && ubuntu=${P2S_UBUNTU_FIXED[$branch@$(p2s_release)]:-}
   if [ -n "$ubuntu" ] && dpkg --compare-versions "$ver" ge "$ubuntu"; then
     echo "fixed distro-threshold"
   elif [ -n "$upstream" ] && dpkg --compare-versions "$(p2s_upstream "$ver")" ge "$upstream"; then

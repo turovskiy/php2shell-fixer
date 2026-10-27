@@ -578,7 +578,8 @@ echo "▸ verdict (installed build)"
 . "$S/lib/hostfacts.sh"
 # shellcheck source=../scripts/lib/pins.sh
 . "$S/lib/pins.sh"
-vd() { p2s_verdict "$1" "$2" "$(p2s_origin "$2")" "$3"; }
+# The host release comes from P2S_RELEASE here, never from the machine running the tests: REL, else 24.04.
+vd() { P2S_RELEASE=${REL:-24.04} p2s_verdict "$1" "$2" "$(p2s_origin "$2")" "$3"; }
 eq "$(vd 8.3 8.3.6-0ubuntu0.24.04.12 no)" "unfixed below-threshold" "Ubuntu 8.3 .12 unfixed"
 eq "$(vd 8.3 8.3.6-0ubuntu0.24.04.13 yes)" "fixed distro-threshold" "Ubuntu 8.3 .13 fixed"
 eq "$(vd 7.4 1:7.4.33-24+ubuntu24.04.1+deb.sury.org+1 no)" "unfixed no-cve-in-changelog" "sury 7.4.33-24 unfixed"
@@ -587,11 +588,22 @@ eq "$(vd 8.4 8.4.17-1+ubuntu24.04.1+deb.sury.org+1 no)" "unfixed below-threshold
 eq "$(vd 8.4 8.4.27-1+ubuntu24.04.1+deb.sury.org+1 no)" "fixed upstream-threshold" "sury 8.4.27 fixed"
 eq "$(vd 8.1 8.1.33-1+ubuntu24.04.1+deb.sury.org+1 no)" "unfixed no-cve-in-changelog" "sury 8.1.33 unfixed"
 eq "$(vd 8.1 8.1.34-9+ubuntu24.04.1+deb.sury.org+1 yes)" "fixed changelog" "sury 8.1.34-9 fixed by changelog"
-eq "$(vd 8.1 8.1.2-1ubuntu2.28 no)" "fixed distro-threshold" "Ubuntu 8.1 .28 fixed"
-eq "$(vd 8.1 8.1.2-1ubuntu2.27 no)" "unfixed below-threshold" "Ubuntu 8.1 .27 unfixed"
+eq "$(REL=22.04 vd 8.1 8.1.2-1ubuntu2.28 no)" "fixed distro-threshold" "Ubuntu 8.1 .28 fixed"
+eq "$(REL=22.04 vd 8.1 8.1.2-1ubuntu2.27 no)" "unfixed below-threshold" "Ubuntu 8.1 .27 unfixed"
 eq "$(vd 8.2 8.2.29-1~deb12u1 no)" "unfixed below-threshold" "Debian 8.2.29 without CVE lines unfixed"
 eq "$(vd 8.2 8.2.29-1~deb12u2 yes)" "fixed changelog" "Debian backport fixed by changelog"
 eq "$(vd 8.5 8.5.12-1+ubuntu24.04.1+deb.sury.org+1 no)" "fixed upstream-threshold" "sury 8.5.12 fixed"
+# Ubuntu fixes 8.5 on a different base per release (USN-8948-1): a threshold holds for its own release only.
+eq "$(REL=26.04 vd 8.5 8.5.4-0ubuntu1.5 download-failed)" "fixed distro-threshold" "Ubuntu 26.04 8.5 1.5 fixed without its changelog"
+eq "$(REL=26.04 vd 8.5 8.5.4-0ubuntu1.4 no)" "unfixed below-threshold" "Ubuntu 26.04 8.5 1.4 unfixed"
+eq "$(REL=26.10 vd 8.5 8.5.9-0ubuntu2 no)" "unfixed below-threshold" \
+  "Ubuntu 26.10 8.5.9-0ubuntu2 unfixed, though above 26.04's fixed 8.5.4-0ubuntu1.5"
+eq "$(REL=26.10 vd 8.5 8.5.9-0ubuntu2.1 no)" "fixed distro-threshold" "Ubuntu 26.10 8.5 2.1 fixed"
+eq "$(REL=22.04 vd 8.3 8.3.6-0ubuntu0.24.04.13 no)" "unfixed below-threshold" "24.04's 8.3 threshold does not apply on 22.04"
+eq "$(P2S_ROOT=$WORK/no-such-root P2S_RELEASE= p2s_verdict 8.3 8.3.6-0ubuntu0.24.04.13 distro no)" "unfixed below-threshold" \
+  "no os-release: no distro threshold"
+eq "$(P2S_ROOT=$WORK/hosts/web-e/root P2S_RELEASE= p2s_release) $(P2S_ROOT=$WORK/hosts/web-c/root P2S_RELEASE= p2s_release)" "22.04 12" \
+  "release from the host's os-release"
 eq "$(vd 8.0 1:8.0.30-9+ubuntu24.04.1+deb.sury.org+1 missing)" "unfixed no-cve-in-changelog" "missing changelog is not a fix"
 eq "$(p2s_origin 8.3.6-0ubuntu0.24.04.13) $(p2s_origin 1:7.4.33-31+ubuntu24.04.1+deb.sury.org+1) $(p2s_origin 8.2.29-1~deb12u1) $(p2s_origin 8.3.36-1)" \
   "distro ppa distro other" "origin: Ubuntu, sury, Debian, other"
@@ -1192,6 +1204,46 @@ PF=$(P2S_CACHE=$WORK/cache-deb bash "$S/run.sh" fix web-m); code=$?
 eq "$code" 3 "Ubuntu-numbered .13 from the PPA, fix: still unfixed -> exit 3"
 has "$PF" "kind=fix host=web-m branch=8.3 before=8.3.6-0ubuntu0.24.04.13 after=8.3.6-0ubuntu0.24.04.13 target=none fixed=no restart=done modules=same state=unfixed-mitigated" \
   "Ubuntu-numbered .13 from the PPA, fix: judged as the PPA's build, mitigated"
+# web-m as Ubuntu with distro PHP 8.5 only: 26.04 (resolute) on 8.5.4-0ubuntu1.4 with the fixed 1.5 in its
+# lists but no candidate .deb to download, and 26.10 (stonking) on 8.5.9-0ubuntu2, which sorts above 26.04's
+# fixed build and is still unfixed. Only the per-release threshold tells them apart.
+u85() { # u85 <release> <codename> <installed> <offered>...
+  local v code=$2
+  rm -rf "$WORK/hosts/web-m"
+  cp -a "$WORK/web-m.ubuntu" "$WORK/hosts/web-m"
+  local m=$WORK/hosts/web-m
+  rm -rf "$m/debs" "$m/madison"/* "$m/root/usr/share/doc"/* "$m/root/var/lib/apt/lists"
+  printf '%s\n' 'PRETTY_NAME="Ubuntu"' "VERSION_ID=\"$1\"" "VERSION_CODENAME=$2" 'ID=ubuntu' >"$m/root/etc/os-release"
+  printf 'ii |%s|%s\n' php8.5-fpm "$3" php8.5-common "$3" php8.5-cli "$3" >"$m/dpkg-query.txt"
+  echo php8.5-fpm >"$m/active.txt"
+  shift 3
+  for v; do
+    printf ' php8.5-fpm | %s | %s\n' "$v" "http://security.ubuntu.com/ubuntu $code-security/universe amd64 Packages"
+  done >"$m/madison/php8.5-fpm.txt"
+  mkdir -p "$m/root/usr/share/doc/php8.5-common" "$m/root/var/lib/apt/lists"
+  printf '%s\n' "php8.5 ($v) $code; urgency=medium" '  * No-change rebuild' \
+    | gzip -n >"$m/root/usr/share/doc/php8.5-common/changelog.Debian.gz"
+}
+u85 26.04 resolute 8.5.4-0ubuntu1.4 8.5.4-0ubuntu1.4 8.5.4-0ubuntu1.5
+touch -d '2026-10-24 06:00:00 UTC' "$WORK/hosts/web-m/root/var/lib/apt/lists/security.ubuntu.com_ubuntu_dists_resolute-security_universe_binary-amd64_Packages"
+RA=$(P2S_CACHE=$WORK/cache-deb bash "$S/run.sh" audit web-m)
+has "$RA" "kind=candidate host=web-m branch=8.5 version=8.5.4-0ubuntu1.5 origin=distro cve_changelog=download-failed verdict=fixed reason=distro-threshold" \
+  "Ubuntu 26.04: candidate 8.5.4-0ubuntu1.5 fixed by the 26.04 threshold, its .deb not downloadable"
+has "$RA" "branch=8.5 sapi=fpm installed=8.5.4-0ubuntu1.4 origin=distro active=active cve_changelog=no verdict=unfixed reason=below-threshold target=8.5.4-0ubuntu1.5 target_reason=fixed-candidate" \
+  "Ubuntu 26.04: 8.5.4-0ubuntu1.4 unfixed, target 8.5.4-0ubuntu1.5"
+: >"$STUB_LOG"
+RF=$(P2S_CACHE=$WORK/cache-deb bash "$S/run.sh" fix web-m); code=$?
+eq "$code" 0 "Ubuntu 26.04 fix: exit 0"
+has "$(grep -E '^apt-get .* install ' "$STUB_LOG")" "php8.5-fpm=8.5.4-0ubuntu1.5" "Ubuntu 26.04 fix: php8.5-fpm pinned to 8.5.4-0ubuntu1.5"
+has "$RF" "kind=fix host=web-m branch=8.5 before=8.5.4-0ubuntu1.4 after=8.5.4-0ubuntu1.5 target=8.5.4-0ubuntu1.5 fixed=yes restart=done modules=same state=fixed" \
+  "Ubuntu 26.04 fix: fixed by the threshold, though the installed changelog names no CVE"
+[ -e "$WORK/hosts/web-m/root/etc/php/8.5/fpm/conf.d/99-php2shell-backtraces.ini" ] \
+  && bad "Ubuntu 26.04 fix: no backtrace stopgap on a fixed 8.5" || ok "Ubuntu 26.04 fix: no backtrace stopgap on a fixed 8.5"
+u85 26.10 stonking 8.5.9-0ubuntu2 8.5.9-0ubuntu2
+touch -d '2026-10-24 06:00:00 UTC' "$WORK/hosts/web-m/root/var/lib/apt/lists/security.ubuntu.com_ubuntu_dists_stonking-security_universe_binary-amd64_Packages"
+SA=$(P2S_CACHE=$WORK/cache-deb bash "$S/run.sh" audit web-m)
+has "$SA" "branch=8.5 sapi=fpm installed=8.5.9-0ubuntu2 origin=distro active=active cve_changelog=no verdict=unfixed reason=below-threshold target=none target_reason=fixed-distro-build-not-in-cached-lists" \
+  "Ubuntu 26.10: 8.5.9-0ubuntu2 unfixed, though above 26.04's fixed 8.5.4-0ubuntu1.5"
 rm -rf "$WORK/hosts/web-m"
 mv "$WORK/web-m.ubuntu" "$WORK/hosts/web-m"
 

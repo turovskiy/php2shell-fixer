@@ -26,7 +26,7 @@ Records name the SAPI in `sapi=`: `fpm` (PHP-FPM, service `php<X.Y>-fpm`), `apac
 
 | Reason | Meaning |
 |---|---|
-| `distro-threshold` | Ubuntu build at or above the fixed Ubuntu revision |
+| `distro-threshold` | Ubuntu build at or above the fixed Ubuntu revision of the host's own release (`VERSION_ID`): Ubuntu fixes one branch on a different base per release (8.5: `8.5.4-0ubuntu1.5` on 26.04, `8.5.9-0ubuntu2.1` on 26.10), so a threshold never applies across releases |
 | `upstream-threshold` | Upstream part of the version at or above the fixed upstream release |
 | `changelog` | No threshold met, but the installed package changelog names both CVEs (vendor backport) |
 | `below-threshold` | A threshold exists for this branch and origin, the build is below it, and the changelog does not name both CVEs |
