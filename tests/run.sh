@@ -139,6 +139,23 @@ derive web-qc root/var/www/shop/.user.ini 'session.upload_progress.enabled = On'
 sed 's/fastcgi_param PHP_VALUE.*$//' <<<"$NGXSITE" >"$WORK/hosts/web-qc/root/etc/nginx/sites-enabled/shop"
 for d in a b c; do mkdir -p "$WORK/hosts/web-qc/root/var/www/shop/wp-content/$d"
   printf 'session.upload_progress.enabled = Off\n' >"$WORK/hosts/web-qc/root/var/www/shop/wp-content/$d/.user.ini"; done
+# PHP outside dpkg on web-m (web-ra): a running cPanel php-fpm, an Apache with a source-built libphp mapped,
+# an installed Plesk php-fpm nothing runs; web-m's own php-fpm8.3 runs too and is dpkg's.
+derive web-ra ps.txt '1 0 systemd /sbin/init'
+RA=$WORK/hosts/web-ra
+printf '%s\n' '100 1 php-fpm8.3 php-fpm: master process (/etc/php/8.3/fpm/php-fpm.conf)' \
+  '200 1 php-fpm php-fpm: master process (/opt/cpanel/ea-php83/root/etc/php-fpm.conf)' \
+  '300 1 apache2 /usr/sbin/apache2 -k start' >>"$RA/ps.txt"
+mkdir -p "$RA/root/proc/100" "$RA/root/proc/200" "$RA/root/proc/300" "$RA/root/opt/cpanel/ea-php83/root/usr/sbin" \
+  "$RA/root/opt/plesk/php/8.2/sbin"
+ln -s /usr/sbin/php-fpm8.3 "$RA/root/proc/100/exe"
+ln -s /opt/cpanel/ea-php83/root/usr/sbin/php-fpm "$RA/root/proc/200/exe"
+printf '%s\n' '7f00a000-7f00b000 r-xp 00000000 08:01 1234 /usr/lib/x86_64-linux-gnu/libc.so.6' \
+  '7f00c000-7f00d000 r-xp 00000000 08:01 5678 /usr/local/lib/libphp8.2.so' \
+  '7f00e000-7f00f000 r--p 00001000 08:01 5678 /usr/local/lib/libphp8.2.so' >"$RA/root/proc/300/maps"
+printf '#!/bin/sh\necho "PHP 8.3.30 (fpm-fcgi) (built: Oct  1 2026)"\n' >"$RA/root/opt/cpanel/ea-php83/root/usr/sbin/php-fpm"
+printf '#!/bin/sh\necho "PHP 8.2.29 (fpm-fcgi) (built: Sep  3 2026)"\n' >"$RA/root/opt/plesk/php/8.2/sbin/php-fpm"
+chmod +x "$RA/root/opt/cpanel/ea-php83/root/usr/sbin/php-fpm" "$RA/root/opt/plesk/php/8.2/sbin/php-fpm"
 derive web-pd root/var/lib/php2shell/policy-rc.d.kept "$OWNRCD"   # a run killed (SIGKILL) mid-install left ours
 OURRCD=$'#!/bin/sh\n# php2shell-fixer: no service actions during the patch install; removed after it\nexit 101'
 mkdir -p "$WORK/hosts/web-pd/root/usr/sbin" && printf '%s\n' "$OURRCD" >"$WORK/hosts/web-pd/root/usr/sbin/policy-rc.d"
@@ -275,7 +292,29 @@ fi
 # show -p ActiveEnterTimestamp --value <unit>: start time from started.txt ("<unit> <time>"), empty if absent
 [ "$1" = show ] && [ -f "$P2S_STUB/started.txt" ] && sed -n "s/^${!#} //p" "$P2S_STUB/started.txt"
 exit 0'
-stub dpkg "exec $REAL_DPKG \"\$@\""
+# dpkg -S <path>: owned when the path is what an installed package of dpkg-query.txt ships (php<X.Y>-fpm
+# /usr/sbin/php-fpm<X.Y>, php<X.Y>-cgi /usr/bin/php-cgi<X.Y>, libapache2-mod-php<X.Y> its libphp<X.Y>.so);
+# everything else goes to the real dpkg.
+stub dpkg 'if [ "$1" = -S ]; then
+  awk -F"|" -v f="$2" "\$1 ~ /^ii/ {
+    p = \$2; v = p; sub(/^(libapache2-mod-)?php/, \"\", v); sub(/-.*/, \"\", v)
+    if ((p ~ /-fpm\$/ && f == \"/usr/sbin/php-fpm\" v) || (p ~ /-cgi\$/ && f == \"/usr/bin/php-cgi\" v) \
+      || (p ~ /^libapache2-mod-php/ && f == \"/usr/lib/apache2/modules/libphp\" v \".so\")) { print p \": \" f; found = 1 }
+  } END { exit !found }" "$P2S_STUB/dpkg-query.txt" 2>/dev/null || { echo "dpkg-query: no path found matching pattern $2" >&2; exit 1; }
+  exit 0
+fi
+exec "$P2S_REAL_DPKG" "$@"'
+# ps -eo <fields>: ps.txt lines are "<pid> <ppid> <comm> <args...>"; prints the fields asked for (pid, ppid,
+# comm, args; "=" suffixes drop the header, as here every caller asks).
+stub ps 'f=""; for a; do case $a in -eo) ;; -*) ;; *) f=$a ;; esac; done
+[ -f "$P2S_STUB/ps.txt" ] || exit 0
+awk -v f="$f" "BEGIN { n = split(f, k, \",\"); for (i = 1; i <= n; i++) sub(/=.*/, \"\", k[i]) }
+  { out = \"\"; for (i = 1; i <= n; i++) {
+      if (k[i] == \"pid\") x = \$1; else if (k[i] == \"ppid\") x = \$2; else if (k[i] == \"comm\") x = \$3
+      else { x = \$4; for (j = 5; j <= NF; j++) x = x \" \" \$j }
+      out = out (i > 1 ? \" \" : \"\") x }
+    print out }" "$P2S_STUB/ps.txt"'
+
 # apt as the auto-update keeper sees it: preferences, candidates, apt.conf.d, unattended-upgrades. Shared by the
 # apt-cache, apt-config and unattended-upgrade stubs; not on PATH, so it logs nothing itself.
 export P2S_REAL_DPKG=$REAL_DPKG P2S_STUBLIB=$WORK/stublib
@@ -646,7 +685,7 @@ export TMPDIR=$WORK/hosttmp
 mkdir -p "$TMPDIR"
 
 # Calls an audit may make; anything else in the stub log is a write or a package operation.
-READ_ONLY='^(ssh (-o [^ ]+ )*[^ ]+ bash -s|hostname ?|apachectl -t -D DUMP_INCLUDES|dpkg-query .*|systemctl is-active [^ ]+|systemctl show -p ActiveEnterTimestamp --value [^ ]+|dpkg --compare-versions .*|apt-cache madison [^ ]+|apt-cache policy [^ ]+|apt-get download -q [^ ]+|dpkg-deb --fsys-tarfile [^ ]+|php-(fpm|cgi)[0-9.]+ -i|php[0-9.]+ -c [^ ]+ -i|apt-mark showhold|apt-config dump|nginx -T|apt-helper .* download-file [^ ]+ [^ ]+)$'
+READ_ONLY='^(ssh (-o [^ ]+ )*[^ ]+ bash -s|hostname ?|apachectl -t -D DUMP_INCLUDES|dpkg-query .*|systemctl is-active [^ ]+|systemctl show -p ActiveEnterTimestamp --value [^ ]+|dpkg --compare-versions .*|dpkg -S [^ ]+|ps -eo [^ ]+|apt-cache madison [^ ]+|apt-cache policy [^ ]+|apt-get download -q [^ ]+|dpkg-deb --fsys-tarfile [^ ]+|php-(fpm|cgi)[0-9.]+ -i|php[0-9.]+ -c [^ ]+ -i|apt-mark showhold|apt-config dump|nginx -T|apt-helper .* download-file [^ ]+ [^ ]+)$'
 fingerprint() { (cd "$WORK/hosts" && find . -type f -exec md5sum {} + | sort); }
 
 echo "▸ verdict (installed build)"
@@ -1181,6 +1220,27 @@ has "$QK" "kind=override host=web-qc branch=8.3 sapi=fpm file=/var/www/shop line
   "web-qc capped at 2: the cap recorded"
 has "$(bash "$S/report.sh" "$(sed -n 's/^log: //p' <<<"$QK")")" '.user.ini scan of `/var/www/shop` stopped at its file cap' "report: a capped .user.ini scan"
 has "$(bash "$S/report.sh" "$(sed -n 's/^log: //p' <<<"$QE")")" '`/etc/nginx/sites-enabled/shop:5` PHP_VALUE = 1 - **re-enables it**' "report: the nginx override"
+
+echo "▸ PHP outside dpkg"
+RAA=$(bash "$S/run.sh" audit web-ra)
+has "$RAA" "kind=foreign_php host=web-ra path=/opt/cpanel/ea-php83/root/usr/sbin/php-fpm sapi=fpm running=yes version=8.3.30 source=cpanel" \
+  "web-ra: running cPanel php-fpm, by its /proc exe"
+has "$RAA" "kind=foreign_php host=web-ra path=/usr/local/lib/libphp8.2.so sapi=apache2 running=yes version=8.2 source=local" \
+  "web-ra: a libphp Apache has mapped that dpkg does not own -> sapi=apache2"
+has "$RAA" "kind=foreign_php host=web-ra path=/opt/plesk/php/8.2/sbin/php-fpm sapi=fpm running=no version=8.2.29 source=plesk" \
+  "web-ra: installed Plesk php-fpm nothing runs"
+eq "$(grep -c 'kind=foreign_php' <<<"$RAA")" 3 "web-ra: dpkg's php-fpm8.3 and the libc mapping are not foreign"
+hasnt "$(bash "$S/next.sh" "$(sed -n 's/^log: //p' <<<"$RAA")")" ": done - " "web-ra: next step is not done"
+has "$(bash "$S/report.sh" "$(sed -n 's/^log: //p' <<<"$RAA")")" '| `/opt/cpanel/ea-php83/root/usr/sbin/php-fpm` | fpm | cpanel | 8.3.30 | yes |' \
+  "report: PHP outside dpkg listed"
+RAE=$(bash "$S/run.sh" ensure web-ra)
+has "$RAE" "PHP outside dpkg left alone: /opt/cpanel/ea-php83/root/usr/sbin/php-fpm (fpm, running yes)" "web-ra: ensure says it leaves it alone"
+eq "$(ls "$RA/root/opt/cpanel/ea-php83/root/usr/sbin")" "php-fpm" "web-ra: ensure wrote nothing under cPanel's PHP"
+RAF=$(bash "$S/run.sh" fix web-ra)
+has "$RAF" "PHP outside dpkg left alone: /usr/local/lib/libphp8.2.so (apache2, running yes); its vendor updates it" "web-ra: fix says it leaves it alone"
+hasnt "$RAF" "ea-php83=" "web-ra: fix installs nothing for cPanel's PHP"
+MA=$(bash "$S/run.sh" audit web-m)
+eq "$(grep -c 'kind=foreign_php' <<<"$MA")" 0 "web-m (dpkg PHP only): no foreign_php record"
 
 echo "▸ fix"
 state() { echo "$WORK/hosts/$1/root/var/lib/php2shell"; }
@@ -1973,11 +2033,13 @@ has "$NX" "blocked: ensure - last ensure: exit-3, not mitigated: 8.3/fpm:overrid
 has "$NX" "stale-ensure: ensure - not mitigated" "next: an ensure older than the audit does not count"
 has "$NX" "never-audited: audit - no audit yet" "next: no audit -> audit"
 has "$NX" "fix-ok: verify - fix finished after the last audit" "next: successful fix -> verify"
+has "$NX" "foreign-cpanel: manual - PHP outside dpkg, which this plugin neither judges nor patches: /opt/cpanel/ea-php83/root/usr/sbin/php-fpm: cPanel's ea-php packages" \
+  "next: PHP outside dpkg on an otherwise done host -> manual, with the vendor's route"
 has "$NX" "fix-partial: fix - last fix: exit-3, unfixed: php8.4" "next: fix that left a branch unfixed names it"
 has "$NX" "hook-missing: ensure - mitigated, but the apt hook that keeps it in place is missing" "next: missing apt hook -> ensure"
 has "$NX" "needs-autoupdate: autoupdate - the ondrej PPA is configured, but unattended-upgrades does not install PHP updates from it" \
   "next: everything fixed, PPA not covered -> autoupdate"
-eq "$(wc -l <<<"$NX")" 14 "next: one line per host"
+eq "$(wc -l <<<"$NX")" 15 "next: one line per host"
 eq "$(bash "$S/next.sh" "$LOG_YA" "$LOG_AY2")" "web-y: verify - autoupdate finished after the last audit; audit again to confirm" \
   "next: autoupdate after the audit -> verify"
 eq "$(bash "$S/next.sh" "$LOG_YA" "$LOG_AR")" "web-y: autoupdate - last autoupdate: exit-1, refused: php8.3 would change origin, pin that does not hold: $PIN83" \

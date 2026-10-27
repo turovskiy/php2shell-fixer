@@ -1,0 +1,6 @@
+@p2s schema=1 kind=run target=foreign-cpanel mode=audit started=20261026T090000.000Z
+@p2s schema=1 kind=host host=foreign-cpanel os=ubuntu-24.04
+@p2s schema=1 kind=branch host=foreign-cpanel branch=8.2 sapi=fpm verdict=fixed restart=ok
+@p2s schema=1 kind=mitigation host=foreign-cpanel branch=8.2 sapi=fpm state=mitigated
+@p2s schema=1 kind=foreign_php host=foreign-cpanel path=/opt/cpanel/ea-php83/root/usr/sbin/php-fpm sapi=fpm running=yes version=8.3.30 source=cpanel
+@p2s schema=1 kind=run_end target=foreign-cpanel mode=audit exit=0 status=ok
