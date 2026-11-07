@@ -178,7 +178,7 @@ files_touched:
   - tests/fixtures/logs/verify-ensure-20261026T100000.000Z.log
   - tests/run.sh
 ended_at: "2026-10-26T15:17:02Z"
-status: active
+status: promoted
 git:
   repo_root: /home/alexturik/ALEXTURIK_DEV/CC_PLUGINS_BY_ALEXTURIK/php2shell-fixer
   branch: wrap-changelog-8-merged
@@ -215,6 +215,7 @@ confidence: 0.58
 review: unreviewed
 tier: supporting
 summary: 'Goal: build the php2shell-fixer Claude Code plugin from an empty repo: agent-skills setup, PRD and tickets on GitHub, implement tickets #2-#8 (audit, candidate target, ensure mitigation, host facts, f'
+promoted_to: pattern/shell-composition-hides-a-failed-step-s-exit-status-from
 ---
 
 # php2shell-fixer plugin: audit, ensure, fleet, detached patcher, apt hook
