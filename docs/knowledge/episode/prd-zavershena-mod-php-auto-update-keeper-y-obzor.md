@@ -152,6 +152,10 @@ confidence: 0.58
 review: unreviewed
 tier: supporting
 summary: '**Цель:** завершить PRD #1 (php2shell-fixer) путем реализации последних двух заблокированных тикетов (#9 mod_php и #10 auto-update keeper), провести полный обзор гілки і мержить в main.'
+provenance:
+  extracted: 0
+  inferred: 1
+  ambiguous: 0
 ---
 
 # PRD завершена: mod_php, auto-update keeper и обзор
